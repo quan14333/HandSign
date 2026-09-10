@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "labels": {
+    "Cảm ơn": {
+      "threshold_distance": 4.94003,
+      "correct_count": 5,
+      "incorrect_count": 5,
+      "correct_median_distance": 4.627085,
+      "incorrect_median_distance": 6.332769,
+      "balanced_accuracy": 0.9,
+      "quality": "low_sample"
+    }
+  }
+}

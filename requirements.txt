@@ -1,0 +1,11 @@
+# Landmark capture and form evaluation
+numpy>=1.26,<3
+fastdtw>=0.3.4
+mediapipe>=0.10.14
+opencv-python>=4.8
+
+# Optional semantic label recognition (used by evaluate.py --video)
+torch>=2.2
+transformers>=4.40
+huggingface-hub>=0.23
+decord>=0.6.0

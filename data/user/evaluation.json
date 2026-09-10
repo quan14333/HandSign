@@ -1,0 +1,88 @@
+{
+  "target_label": "Cảm ơn",
+  "sequence_path": "data\\user\\sequence_user\\record.npz",
+  "tracking": {
+    "status": "ok",
+    "frame_count": 54,
+    "hand_detected_fraction": 0.8889,
+    "left_hand_detected_fraction": 0.7037,
+    "right_hand_detected_fraction": 0.1852,
+    "face_detected_fraction": 1.0
+  },
+  "recognition": {
+    "status": "match",
+    "predicted_label": "Cảm ơn",
+    "confidence": 0.8143,
+    "margin": 0.7557
+  },
+  "status": "right_label_needs_practice",
+  "form": {
+    "status": "needs_practice",
+    "score": 3.03,
+    "comparison_distance": 6.61395,
+    "reference_count": 33,
+    "calibration_count": 33,
+    "calibration_quality": "ok",
+    "decision_source": "labeled_user_validation",
+    "validation": {
+      "threshold_distance": 4.94003,
+      "correct_count": 5,
+      "incorrect_count": 5,
+      "correct_median_distance": 4.627085,
+      "incorrect_median_distance": 6.332769,
+      "balanced_accuracy": 0.9,
+      "quality": "low_sample"
+    }
+  },
+  "feedback": [
+    {
+      "region": "left_hand",
+      "distance": 0.8609,
+      "threshold": 0.6781,
+      "severity": "needs_attention",
+      "segment": {
+        "start_frame": 0,
+        "end_frame": 9,
+        "start_percent": 0,
+        "end_percent": 17
+      },
+      "message": "Tay trái lệch rõ nhất ở khoảng 0-17% của động tác."
+    },
+    {
+      "region": "right_hand",
+      "distance": 1.0039,
+      "threshold": 1.3547,
+      "severity": "ok",
+      "message": "Vùng này đang khớp tốt với các mẫu gần nhất."
+    },
+    {
+      "region": "face",
+      "distance": 0.4928,
+      "threshold": 1.6311,
+      "severity": "ok",
+      "message": "Vùng này đang khớp tốt với các mẫu gần nhất."
+    }
+  ],
+  "feedback_calibration": {
+    "thresholds": {
+      "left_hand": 0.678131,
+      "right_hand": 1.354718,
+      "face": 1.631139
+    },
+    "sample_count": 24
+  },
+  "nearest_references": [
+    {
+      "file": "679364.npy",
+      "distance": 6.038819
+    },
+    {
+      "file": "285652.npy",
+      "distance": 6.791675
+    },
+    {
+      "file": "950155.npy",
+      "distance": 7.011356
+    }
+  ]
+}
