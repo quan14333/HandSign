@@ -555,7 +555,7 @@ Chỉ so với mẫu Cảm ơn vì target_label là Cảm ơn. DTW này không t
 
 ## 10. Score được tính chính xác ra sao?
 
-Nguồn: [sign_eval/evaluator.py](C:/HandSign/sign_eval/evaluator.py:346).
+Nguồn: [SignEvaluator._validation_score](C:/HandSign/sign_eval/evaluator.py:141).
 
 ### 10.1. Công thức trước khi sửa
 
@@ -574,33 +574,52 @@ baseline.py cũ đã tạo một JSON phân phối khác, nhưng dtw.py cũ khô
 
 ### 10.2. Công thức hiện tại
 
-~~~text
-score = 100 * count(b_i >= D_user) / số giá trị b_i
-~~~
+Khi label có bộ validation đúng/sai, form.score được quy đổi trực tiếp từ khoảng cách DTW. Đặt:
 
-b_i là 33 mốc leave-one-out của Cảm ơn; D_user là trung bình DTW top-3 của clip mới.
+- D: trung bình khoảng cách DTW tới top-3 mẫu gần nhất (D chưa làm tròn).
+- a: correct_median_distance, trung vị khoảng cách của nhóm đúng.
+- b: threshold_distance, ngưỡng đạt.
+- c: incorrect_median_distance, trung vị khoảng cách của nhóm sai.
 
-Score là thứ hạng tương đối trong phân phối tham chiếu, với quy ước các giá trị bằng D_user vẫn được tính. Nó không phải xác suất đúng từ và cũng chưa được xác thực là phần trăm kỹ thuật bạn làm đúng.
-
-### 10.3. Vì sao clip của bạn được 3.03?
-
-Các mốc của Cảm ơn hiện nằm từ khoảng 2.01372 tới 13.498868. Trong 33 mốc:
-
-- 32 mốc nhỏ hơn 6.61395.
-- Chỉ một mốc, 13.498868, lớn hơn hoặc bằng 6.61395.
-
-Do đó:
+Với 0 < a < b < c:
 
 ~~~text
-score = 100 * 1/33 = 3.030303...
-JSON làm tròn -> 3.03
+                 / 100 - 20 * D/a                     nếu 0 <= D <= a
+score(D) =       | 80 - 20 * (D-a)/(b-a)                nếu a < D <= b
+                 | 60 - 30 * (D-b)/(c-b)                nếu b < D <= c
+                 \ 30 * 2 ** (-(D-c)/(c-b))             nếu D > c
 ~~~
 
-Không thể dịch thành bạn chỉ làm đúng 3.03% động tác.
+Các mốc D = 0, a, b, c tương ứng 100, 80, 60, 30 điểm. Ba đoạn đầu nội suy tuyến tính; đoạn cuối giảm dần về 0. Khoảng cách tăng thì điểm không tăng. Code làm tròn điểm tới hai chữ số thập phân, rồi dùng chính điểm này để xếp loại, nên điểm hiển thị và form.status luôn nhất quán trong nhánh validation. Làm tròn có thể đưa giá trị cực sát ngưỡng lên đúng 60 hoặc 80 điểm.
 
-Với 33 mốc, bước điểm là khoảng 3.03. Nếu nhiều clip có D nằm giữa 4.933676 và 13.498868 thì đều ra 3.03, dù mức lệch khác nhau khá nhiều. Trong bộ incorrect hiện có, điều này thực sự xảy ra.
+80/60/30 là các mốc quy đổi được chọn cho thang điểm luyện tập, không phải xác suất làm đúng hay phần trăm kỹ thuật đúng. Code yêu cầu các mốc hữu hạn và đúng thứ tự 0 < a < b < c; nếu không thỏa thì báo lỗi để hiệu chỉnh lại validation, không tự gán điểm. Bộ Cảm ơn hiện mới có 5 clip đúng và 5 clip sai nên độ tin cậy vẫn bị giới hạn bởi số mẫu.
 
-Đó là hạn chế của phân phối nhỏ và có một giá trị lớn tách biệt. Đổi công thức sang percentile không tự giải quyết chất lượng feature hoặc khác biệt giữa dataset và webcam.
+Điểm percentile cũ được giữ riêng cho phân tích:
+
+~~~text
+form.reference_percentile = 100 * count(r_i >= D) / số giá trị r_i
+~~~
+
+r_i là các mốc leave-one-out của label, với 33 mốc cho Cảm ơn. Đây là thứ hạng tương đối trong phân phối tham chiếu; các giá trị bằng D vẫn được tính.
+
+Label chưa có validation vẫn dùng percentile làm form.score và giữ quy tắc xếp loại cũ, vì chưa có a, b, c để áp dụng công thức mới. form.decision_source cho biết nhánh đang sử dụng. Các ví dụ score ở những phần lịch sử khác của tài liệu là kết quả trước thay đổi này; với label có validation, hãy đọc chúng là reference_percentile.
+
+### 10.3. Ví dụ Cảm ơn: từ 15.15 thành 81.96 điểm
+
+~~~text
+a = 4.627085
+b = 4.940030
+c = 6.332769
+D = 4.172959 < a
+
+form.score = 100 - 20 * (4.172959 / 4.627085) = 81.96
+form.status = excellent
+form.reference_percentile = 100 * 5/33 = 15.15
+~~~
+
+Kết quả cũ D = 6.61395 từng có score = 3.03 vì chỉ 1/33 mốc tham chiếu lớn hơn hoặc bằng D. Theo công thức mới, D > c nên điểm khoảng 26.08, xếp needs_practice; 3.03 được giữ trong reference_percentile.
+
+Điểm chính không còn nhảy theo nấc 100/33 khi có validation. Việc đổi thang điểm không sửa lỗi đầu vào như flip khác quy ước dataset hoặc video và sequence không cùng lần quay.
 
 ## 11. Ngưỡng validation 4.94003 lấy ở đâu?
 
@@ -678,25 +697,26 @@ Builder giữ các label khác đã có trong JSON và cập nhật mục label 
 
 ## 12. form.status có liên quan score như thế nào?
 
-Nguồn: [SignEvaluator._form_status](C:/HandSign/sign_eval/evaluator.py:140).
+Nguồn: SignEvaluator._form_status trong [sign_eval/evaluator.py](C:/HandSign/sign_eval/evaluator.py).
 
-Nếu có validation cho label, code ưu tiên:
+Nếu có validation cho label, code tính điểm theo mục 10 rồi xếp loại từ chính form.score đã làm tròn:
 
 | Điều kiện | form.status |
 | --- | --- |
-| D_user <= correct_median_distance | excellent |
-| Nếu không, D_user <= threshold_distance | good |
-| Còn lại | needs_practice |
+| score >= 80 | excellent |
+| 60 <= score < 80 | good |
+| score < 60 | needs_practice |
 
 Với Cảm ơn hiện tại:
 
 ~~~text
-D <= 4.627085 -> excellent
-4.627085 < D <= 4.94003 -> good
-D > 4.94003 -> needs_practice
+D = 4.172959 -> score = 81.96 -> excellent
+D = 4.627085 -> score = 80.00 -> excellent
+D = 4.940030 -> score = 60.00 -> good
+D = 6.332769 -> score = 30.00 -> needs_practice
 ~~~
 
-Ranh so sánh nội bộ dùng D chưa làm tròn trong khi median trong JSON chỉ có 6 chữ số; một giá trị cực gần median có thể hiện bằng nhau trong log nhưng đi vào nhánh good.
+Xếp loại theo điểm hiển thị tránh trường hợp người dùng thấy điểm thấp nhưng hệ thống lại báo excellent. Đây là xếp loại động tác; status tổng vẫn còn phụ thuộc nhận diện đúng nhãn.
 
 Nếu chưa có validation:
 
@@ -710,9 +730,9 @@ Nếu chưa có validation:
 
 Các mốc 75/45/20 do mình chọn; chưa tối ưu từ dữ liệu ground truth.
 
-form.score luôn là percentile reference, ngay cả khi form.status dùng validation user. Không có phép trung bình hay nhân confidence nhận diện vào score.
+Khi có validation, form.score là điểm luyện tập theo hàm chia đoạn và form.reference_percentile lưu percentile cũ. Khi chưa có validation, hai trường cùng là percentile. Không có phép trung bình hay nhân confidence nhận diện vào score.
 
-Vì vậy thực tế có clip correct/1.npy: score=12.12 nhưng form.status=good. Đây là sự không thống nhất về thang diễn giải của thiết kế hiện tại, không phải lỗi in JSON.
+Ví dụ lịch sử correct/1.npy từng có score=12.12 nhưng form.status=good thuộc thiết kế cũ. Sau thay đổi, 12.12 được giữ ở reference_percentile, còn điểm chính dùng cùng thang với xếp loại validation.
 
 calibration_quality=ok và validation.quality=low_sample có thể cùng xuất hiện: một cái đếm 33 reference, cái kia đếm 5 correct + 5 incorrect. Code vẫn dùng ngưỡng low_sample để quyết định, chưa hạ kết luận xuống mức uncertain.
 
@@ -981,4 +1001,3 @@ python evaluate.py --target-label "Cảm ơn" --sequence data/user/sequence_user
 Lệnh cuối vẫn tính form nhưng không xác nhận label bằng video. Baseline.py là alias; không cần chạy thêm sau build_calibration.py.
 
 Để tiến tới một hệ thống chấm kỹ thuật đáng tin cậy, các phần còn thiếu đã được ghi ở mục 16 cần được xử lý và kiểm chứng bằng clip độc lập. Tài liệu này phản ánh phiên bản đang có để bạn có thể giải thích và kiểm tra từng quyết định, không coi các phép đo thử nghiệm là kết luận chuyên môn đã được xác thực.
-

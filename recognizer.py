@@ -1,4 +1,4 @@
-"""VideoMAE-based sign-label recognition used before form evaluation."""
+
 
 from __future__ import annotations
 

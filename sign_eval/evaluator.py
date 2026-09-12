@@ -138,25 +138,47 @@ class SignEvaluator:
         return result
 
     @staticmethod
+    def _validation_score(distance: float, validation: dict[str, Any]) -> float:
+        """Map DTW distance to a practice score, not a probability of correctness."""
+
+        a = float(validation["correct_median_distance"])
+        b = float(validation["threshold_distance"])
+        c = float(validation["incorrect_median_distance"])
+        if not np.isfinite([a, b, c]).all() or not 0 < a < b < c:
+            raise ValueError(
+                "Practice scoring requires 0 < correct_median_distance < "
+                "threshold_distance < incorrect_median_distance. "
+                "Rebuild validation with representative correct/incorrect clips."
+            )
+        if not np.isfinite(distance) or distance < 0:
+            raise ValueError("Comparison distance must be finite and non-negative.")
+        if distance <= a:
+            score = 100 - 20 * distance / a
+        elif distance <= b:
+            score = 80 - 20 * (distance - a) / (b - a)
+        elif distance <= c:
+            score = 60 - 30 * (distance - b) / (c - b)
+        else:
+            score = 30 * 2 ** (-(distance - c) / (c - b))
+        return round(float(score), 2)
+
+    @staticmethod
     def _form_status(
-        percentile: float,
+        score: float,
         low_sample: bool,
-        comparison_distance: float,
         validation: dict[str, Any] | None,
     ) -> str:
         if validation is not None:
-            threshold = float(validation["threshold_distance"])
-            correct_median = float(validation["correct_median_distance"])
-            if comparison_distance <= correct_median:
+            if score >= 80:
                 return "excellent"
-            return "good" if comparison_distance <= threshold else "needs_practice"
+            return "good" if score >= 60 else "needs_practice"
         if low_sample:
             return "estimated_low_sample"
-        if percentile >= 75:
+        if score >= 75:
             return "excellent"
-        if percentile >= 45:
+        if score >= 45:
             return "good"
-        if percentile >= 20:
+        if score >= 20:
             return "needs_practice"
         return "far_from_reference"
 
@@ -351,11 +373,14 @@ class SignEvaluator:
         )
         low_sample = details["quality"] == "low_sample"
         validation = self._validation_for_label(label)
+        score = (
+            self._validation_score(comparison_distance, validation)
+            if validation is not None else round(percentile_score, 2)
+        )
         form = {
-            "status": self._form_status(
-                percentile_score, low_sample, comparison_distance, validation
-            ),
-            "score": round(percentile_score, 2),
+            "status": self._form_status(score, low_sample, validation),
+            "score": score,
+            "reference_percentile": round(percentile_score, 2),
             "comparison_distance": round(comparison_distance, 6),
             "reference_count": details["reference_count"],
             "calibration_count": len(reference_distribution),
