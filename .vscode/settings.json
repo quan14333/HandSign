@@ -1,0 +1,8 @@
+{
+  "python.defaultInterpreterPath": "C:\\Users\\quan\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
+  "terminal.integrated.env.windows": {
+    "USE_TF": "0",
+    "HF_HUB_OFFLINE": "1",
+    "PYTHONUTF8": "1"
+  }
+}

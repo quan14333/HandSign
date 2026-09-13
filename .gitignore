@@ -1,3 +1,5 @@
 OpenFace-3.0/ 
 data/video/dataset.zip
 *.zip
+result*/
+data*/

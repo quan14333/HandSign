@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from sign_eval.calibration import build_calibration
 from sign_eval.evaluator import DEFAULT_CALIBRATION_PATH, SignEvaluator
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Evaluate a sign-language practice recording.")
     parser.add_argument("--target-label", required=True, help="The sign the learner was asked to perform.")
     parser.add_argument("--sequence", help=".npy or .npz landmark sequence to evaluate.")

@@ -24,6 +24,8 @@ REGIONS = {
     "right_hand": RIGHT_HAND_IDX,
     "face": FACE_IDX,
 }
+HAND_REGIONS = ("left_hand", "right_hand")
+DEFAULT_REQUIRED_REGIONS = ("left_hand", "right_hand", "face")
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,10 @@ def trim_to_active_hands(
     return landmarks[start:end], validity[start:end]
 
 
-def tracking_report(sequence: LandmarkSequence) -> dict[str, Any]:
+def tracking_report(
+    sequence: LandmarkSequence,
+    required_regions: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
     """Report capture quality without pretending legacy data has masks."""
 
     landmarks = sequence.landmarks
@@ -125,7 +130,21 @@ def tracking_report(sequence: LandmarkSequence) -> dict[str, Any]:
     right_rate = float(validity[:, 1].mean())
     face_rate = float(validity[:, 2].mean())
     hand_rate = float(validity[:, :2].any(axis=1).mean())
-    status = "ok" if hand_rate >= 0.70 else "low_quality"
+    label_aware = required_regions is not None
+    selected_regions = tuple(required_regions or DEFAULT_REQUIRED_REGIONS)
+    required_hands = [region for region in selected_regions if region in HAND_REGIONS]
+    hand_columns = {"left_hand": 0, "right_hand": 1}
+    if label_aware and required_hands:
+        required_hand_rate = float(
+            validity[:, [hand_columns[region] for region in required_hands]]
+            .all(axis=1)
+            .mean()
+        )
+    else:
+        required_hand_rate = hand_rate
+    # Coverage is diagnostic only: low percentages do not block evaluation.
+    quality_threshold = 0.50 if label_aware else 0.70
+    status = "ok" if required_hand_rate >= quality_threshold else "low_quality"
     return {
         "status": status,
         "frame_count": int(len(landmarks)),
@@ -133,6 +152,9 @@ def tracking_report(sequence: LandmarkSequence) -> dict[str, Any]:
         "left_hand_detected_fraction": round(left_rate, 4),
         "right_hand_detected_fraction": round(right_rate, 4),
         "face_detected_fraction": round(face_rate, 4),
+        "required_hand_detected_fraction": round(required_hand_rate, 4),
+        "required_regions": list(selected_regions),
+        "warning": required_hand_rate < 0.70,
     }
 
 
@@ -144,12 +166,34 @@ def frame_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(a - b))
 
 
+def region_indices(regions: tuple[str, ...] | list[str]) -> np.ndarray:
+    """Return landmark indexes for a validated ordered collection of regions."""
+
+    unknown = [region for region in regions if region not in REGIONS]
+    if unknown:
+        raise ValueError(f"Unknown landmark regions: {unknown}")
+    if not regions:
+        raise ValueError("At least one landmark region is required.")
+    return np.concatenate([REGIONS[region] for region in regions])
+
+
 def calculate_dtw(
-    user: np.ndarray, reference: np.ndarray
+    user: np.ndarray,
+    reference: np.ndarray,
+    regions: tuple[str, ...] | list[str] | None = None,
 ) -> tuple[float, list[tuple[int, int]]]:
     """Return path-length-normalized DTW distance and alignment path."""
 
-    distance, path = fastdtw(flatten(user), flatten(reference), dist=frame_distance)
+    user = validate_landmarks(user, "user")
+    reference = validate_landmarks(reference, "reference")
+    if regions is not None:
+        indices = region_indices(regions)
+        user_vectors = user[:, indices].reshape(len(user), -1)
+        reference_vectors = reference[:, indices].reshape(len(reference), -1)
+    else:
+        user_vectors = flatten(user)
+        reference_vectors = flatten(reference)
+    distance, path = fastdtw(user_vectors, reference_vectors, dist=frame_distance)
     if not path:
         raise ValueError("DTW returned an empty alignment path.")
     return float(distance / len(path)), path
@@ -159,12 +203,16 @@ def region_distances_on_path(
     user: np.ndarray,
     reference: np.ndarray,
     path: list[tuple[int, int]],
+    regions: tuple[str, ...] | list[str] | None = None,
 ) -> tuple[dict[str, float], dict[str, np.ndarray]]:
     """Return each region's mean and its per-user-frame aligned errors."""
 
     means: dict[str, float] = {}
     traces: dict[str, np.ndarray] = {}
-    for name, indices in REGIONS.items():
+    selected_regions = tuple(regions or REGIONS)
+    region_indices(selected_regions)
+    for name in selected_regions:
+        indices = REGIONS[name]
         values_by_frame: list[list[float]] = [[] for _ in range(len(user))]
         for user_index, ref_index in path:
             distance = np.linalg.norm(
@@ -178,6 +226,48 @@ def region_distances_on_path(
         means[name] = float(np.nanmean(trace))
         traces[name] = trace
     return means, traces
+
+
+def region_presence_fraction(sequence: np.ndarray, region: str) -> float:
+    """Estimate detector presence in legacy normalized reference arrays.
+
+    Missing regions were stored as 21 identical zero points before global
+    normalization.  They therefore still have no within-frame spatial spread,
+    unlike a detected hand even when that hand is held still.
+    """
+
+    sequence = validate_landmarks(sequence)
+    indices = REGIONS[region]
+    points = sequence[:, indices]
+    spread = np.linalg.norm(points - points.mean(axis=1, keepdims=True), axis=2).mean(axis=1)
+    return float(np.mean(spread > 1e-5))
+
+
+def infer_required_regions(
+    references: list[np.ndarray],
+    minimum_presence: float = 0.10,
+) -> tuple[tuple[str, ...], dict[str, float]]:
+    """Infer which hands a label uses from its legacy reference sequences.
+
+    A median is used so sporadic false detections do not turn a one-hand sign
+    into a two-hand sign.  Face remains part of the score because the corpus
+    uses it as the spatial anchor for hand position.
+    """
+
+    if not references:
+        raise ValueError("At least one reference is required to infer active regions.")
+    presence = {
+        region: float(
+            np.median([region_presence_fraction(reference, region) for reference in references])
+        )
+        for region in HAND_REGIONS
+    }
+    active_hands = [
+        region for region in HAND_REGIONS if presence[region] >= minimum_presence
+    ]
+    if not active_hands:
+        active_hands = [max(HAND_REGIONS, key=presence.get)]
+    return tuple([*active_hands, "face"]), presence
 
 
 def largest_error_segment(trace: np.ndarray, threshold: float) -> tuple[int, int] | None:

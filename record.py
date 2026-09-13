@@ -41,8 +41,8 @@ def create_landmarkers() -> tuple[object, object]:
         base_options=base_options(model_asset_path="hand_landmarker.task"),
         running_mode=vision.RunningMode.IMAGE,
         num_hands=MAX_HANDS,
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.5,
+        min_hand_detection_confidence=0.3,
+        min_hand_presence_confidence=0.3,
     )
     face_options = vision.FaceLandmarkerOptions(
         base_options=base_options(model_asset_path="face_landmarker.task"),

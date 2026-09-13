@@ -1,5 +1,38 @@
 # Giải thích thay đổi và workflow HandSign
 
+## Cập nhật: điểm vùng có trọng số
+
+Nhận diện khác target và confidence ≥ 70% hiện trả `incorrect_label`, score
+null, feedback về nhãn và bỏ qua chấm vùng. Khác target dưới 70% vẫn chấm luyện
+tập, cảnh báo chưa xác nhận đúng từ, không kết luận `correct`. Trùng target vẫn
+dùng điều kiện confidence ≥ 50%, margin ≥ 12% nếu có margin. Đây là quy tắc mới
+thay cho các mô tả mismatch vẫn trả điểm ở phần lịch sử bên dưới.
+
+Tracking hiện chỉ cảnh báo theo tỷ lệ phát hiện tay, không chặn chấm ở bất kỳ
+tỷ lệ nào (kể cả 0%) nếu chuỗi landmark vẫn hợp lệ. `low_quality` vẫn được giữ
+để thể hiện chất lượng dữ liệu. Landmark thiếu có thể ảnh hưởng điểm. Dữ liệu
+toàn số 0 vẫn không chấm; thiếu calibration vùng vẫn trả score null. Các mô tả
+chặn theo tỷ lệ tracking bên dưới là hành vi lịch sử.
+
+Phần mô tả percentile/validation làm điểm chính bên dưới là thiết kế lịch sử.
+Hiện `form.score` lấy trung bình có trọng số từ chính distance/threshold của
+feedback: các tay cần dùng chia nhau 80%, mặt 20%. Nếu chỉ có một tay, tay đó
+nhận 80%; tay bị bỏ qua không tham gia chấm. Nếu không chấm mặt thì các tay
+chia nhau 100%.
+
+Với `r = distance / threshold`: r ≤ 0.3 được 100 điểm; 0.3 < r ≤ 1 dùng
+`100 - 30 * (r - 0.3) / 0.7`; r > 1 dùng `70 * 2^(1-r)`.
+Ngưỡng bằng 0: distance bằng 0 được 100, distance lớn hơn 0 được 0.
+Điểm từng vùng làm tròn hai chữ số, nhân trọng số rồi cộng và làm tròn tổng.
+`excellent` từ 85, `good` từ 70, `needs_practice` từ 30, thấp hơn là
+`far_from_reference`. Feedback từng vùng vẫn báo vượt ngưỡng độc lập với tổng.
+
+`form.region_scores` và `form.region_weights` giải thích điểm tổng;
+`decision_source = weighted_region_thresholds`. Percentile và DTW chỉ còn là
+thông tin tham khảo; validation cũ không quyết định điểm mới. Thiếu ngưỡng vùng
+cần chấm thì score là null và form.status là not_scored. Ít mẫu vẫn được cảnh
+báo qua calibration_quality và feedback.
+
 Tài liệu này mô tả code đang có trong C:\HandSign, đối chiếu với các file đã đọc trước khi sửa trong cuộc hội thoại. Phần so sánh lịch sử dựa trên cả cuộc hội thoại: một số file đã là untracked và record.py đã có thay đổi của bạn trước khi mình làm. Vì vậy git diff với HEAD không đồng nghĩa toàn bộ chênh lệch là do mình tạo.
 
 Mục đích là giải thích nguồn dữ liệu, vai trò từng file, từng phép tính và các giới hạn thực tế. Đây là bản giải thích; trong lượt này mình không thay thuật toán chấm điểm.

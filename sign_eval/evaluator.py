@@ -11,9 +11,11 @@ from typing import Any
 import numpy as np
 
 from .landmarks import (
+    DEFAULT_REQUIRED_REGIONS,
     REGIONS,
     LandmarkSequence,
     calculate_dtw,
+    infer_required_regions,
     largest_error_segment,
     load_landmark_sequence,
     region_distances_on_path,
@@ -23,6 +25,7 @@ from .landmarks import (
 
 DEFAULT_CALIBRATION_PATH = Path("artifacts/label_calibration.json")
 DEFAULT_VALIDATION_PATH = Path("artifacts/user_validation_calibration.json")
+MISMATCH_CONFIDENCE_THRESHOLD = 0.70
 
 
 def canonical_label(value: str) -> str:
@@ -77,7 +80,10 @@ class SignEvaluator:
         self._validation_lookup = {
             canonical_label(label): details for label, details in self.validation_labels.items()
         }
-        self._region_threshold_cache: dict[str, dict[str, Any]] = {}
+        self._region_threshold_cache: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+        self._active_distribution_cache: dict[
+            tuple[str, tuple[str, ...]], np.ndarray
+        ] = {}
 
     def available_labels(self) -> list[str]:
         return sorted(self.calibration["labels"])
@@ -105,26 +111,31 @@ class SignEvaluator:
             raise ValueError(f"No valid references remain for label '{label}'.")
         return references
 
-    def _region_thresholds(self, label: str) -> dict[str, Any]:
+    def _region_thresholds(
+        self, label: str, required_regions: tuple[str, ...]
+    ) -> dict[str, Any]:
         """Compute label-specific regional limits lazily and cache them."""
 
-        if label in self._region_threshold_cache:
-            return self._region_threshold_cache[label]
+        cache_key = (label, required_regions)
+        if cache_key in self._region_threshold_cache:
+            return self._region_threshold_cache[cache_key]
 
         details = self.calibration["labels"][label]
         samples = details.get("region_pair_samples", [])
         if len(samples) < 3:
             result = {"thresholds": None, "sample_count": len(samples)}
-            self._region_threshold_cache[label] = result
+            self._region_threshold_cache[cache_key] = result
             return result
 
-        region_values = {name: [] for name in REGIONS}
+        region_values = {name: [] for name in required_regions}
         label_dir = self.reference_root / label
         for file_a, file_b in samples:
             sequence_a = load_landmark_sequence(label_dir / file_a).landmarks
             sequence_b = load_landmark_sequence(label_dir / file_b).landmarks
-            _, path = calculate_dtw(sequence_a, sequence_b)
-            means, _ = region_distances_on_path(sequence_a, sequence_b, path)
+            _, path = calculate_dtw(sequence_a, sequence_b, required_regions)
+            means, _ = region_distances_on_path(
+                sequence_a, sequence_b, path, required_regions
+            )
             for region, value in means.items():
                 region_values[region].append(value)
 
@@ -134,8 +145,66 @@ class SignEvaluator:
             if values
         }
         result = {"thresholds": thresholds, "sample_count": len(samples)}
-        self._region_threshold_cache[label] = result
+        self._region_threshold_cache[cache_key] = result
         return result
+
+    def _required_regions(
+        self, label: str, references: list[tuple[str, LandmarkSequence]]
+    ) -> tuple[tuple[str, ...], dict[str, float]]:
+        """Use an explicit label config when present, otherwise infer hand use."""
+
+        configured = self.calibration["labels"][label].get("required_regions")
+        arrays = [reference.landmarks for _, reference in references]
+        inferred, presence = infer_required_regions(arrays)
+        if configured is None:
+            return inferred, presence
+        required = tuple(str(region) for region in configured)
+        unknown = [region for region in required if region not in REGIONS]
+        if unknown or not required:
+            raise ValueError(
+                f"Invalid required_regions for '{label}': {configured}"
+            )
+        return required, presence
+
+    def _reference_distribution(
+        self,
+        label: str,
+        references: list[tuple[str, LandmarkSequence]],
+        required_regions: tuple[str, ...],
+        top_k: int,
+    ) -> np.ndarray:
+        """Build a leave-one-out distribution using the same active-region DTW."""
+
+        if required_regions == DEFAULT_REQUIRED_REGIONS:
+            return np.asarray(
+                self.calibration["labels"][label]["loo_top_k_distances"], dtype=float
+            )
+        cache_key = (label, required_regions)
+        cached = self._active_distribution_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        neighbors: list[list[float]] = [[] for _ in references]
+        for index_a, (_, reference_a) in enumerate(references):
+            for index_b in range(index_a + 1, len(references)):
+                reference_b = references[index_b][1]
+                distance, _ = calculate_dtw(
+                    reference_a.landmarks,
+                    reference_b.landmarks,
+                    required_regions,
+                )
+                neighbors[index_a].append(distance)
+                neighbors[index_b].append(distance)
+        distribution = np.asarray(
+            [
+                float(np.mean(sorted(distances)[: min(top_k, len(distances))]))
+                for distances in neighbors
+                if distances
+            ],
+            dtype=float,
+        )
+        self._active_distribution_cache[cache_key] = distribution
+        return distribution
 
     @staticmethod
     def _validation_score(distance: float, validation: dict[str, Any]) -> float:
@@ -163,22 +232,43 @@ class SignEvaluator:
         return round(float(score), 2)
 
     @staticmethod
-    def _form_status(
-        score: float,
-        low_sample: bool,
-        validation: dict[str, Any] | None,
-    ) -> str:
-        if validation is not None:
-            if score >= 80:
-                return "excellent"
-            return "good" if score >= 60 else "needs_practice"
-        if low_sample:
-            return "estimated_low_sample"
-        if score >= 75:
+    def _region_score(distance: float, threshold: float) -> float:
+        """Practice score with full credit inside 30% of the regional limit."""
+
+        if not np.isfinite([distance, threshold]).all() or min(distance, threshold) < 0:
+            raise ValueError("Region distance and threshold must be finite and non-negative.")
+        if threshold == 0:
+            return 100.0 if distance == 0 else 0.0
+        ratio = distance / threshold
+        if ratio <= 0.3:
+            score = 100.0
+        elif ratio <= 1:
+            score = 100 - 30 * (ratio - 0.3) / 0.7
+        else:
+            score = 70 * 2 ** (1 - ratio)
+        return round(float(score), 2)
+
+    @staticmethod
+    def _region_weights(required_regions: tuple[str, ...]) -> dict[str, float]:
+        hands = [region for region in required_regions if region in {"left_hand", "right_hand"}]
+        has_face = "face" in required_regions
+        hand_weight = 0.8 if has_face else 1.0
+        weights = {region: hand_weight / len(hands) for region in hands}
+        if has_face:
+            weights["face"] = 0.2 if hands else 1.0
+        if not weights or set(weights) != set(required_regions):
+            raise ValueError("Scoring requires valid hand or face regions.")
+        return weights
+
+    @staticmethod
+    def _form_status(score: float | None) -> str:
+        if score is None:
+            return "not_scored"
+        if score >= 85:
             return "excellent"
-        if score >= 45:
+        if score >= 70:
             return "good"
-        if score >= 20:
+        if score >= 30:
             return "needs_practice"
         return "far_from_reference"
 
@@ -203,17 +293,22 @@ class SignEvaluator:
         if not predicted_label:
             result["reason"] = "Recognizer returned no predicted label."
             return result
-        if confidence is not None and float(confidence) < 0.50:
+        if confidence is None or not np.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
+            result["reason"] = "Recognizer returned no valid confidence."
+            return result
+        if canonical_label(predicted_label) != canonical_label(target_label):
+            if float(confidence) >= MISMATCH_CONFIDENCE_THRESHOLD:
+                result["status"] = "mismatch"
+            else:
+                result["reason"] = "Different label confidence is below 0.70."
+            return result
+        if float(confidence) < 0.50:
             result["reason"] = "Recognizer confidence is below 0.50."
             return result
         if margin is not None and float(margin) < 0.12:
             result["reason"] = "The two leading label probabilities are too close."
             return result
-        result["status"] = (
-            "match"
-            if canonical_label(predicted_label) == canonical_label(target_label)
-            else "mismatch"
-        )
+        result["status"] = "match"
         return result
 
     @staticmethod
@@ -236,10 +331,11 @@ class SignEvaluator:
         user: np.ndarray,
         matches: list[dict[str, Any]],
         low_sample: bool,
+        required_regions: tuple[str, ...],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        threshold_info = self._region_thresholds(label)
+        threshold_info = self._region_thresholds(label, required_regions)
         thresholds = threshold_info["thresholds"]
-        if thresholds is None:
+        if thresholds is None or any(region not in thresholds for region in required_regions):
             return (
                 [
                     {
@@ -251,11 +347,13 @@ class SignEvaluator:
             )
 
         top_matches = matches[: min(3, len(matches))]
-        mean_values: dict[str, list[float]] = {region: [] for region in REGIONS}
+        mean_values: dict[str, list[float]] = {
+            region: [] for region in required_regions
+        }
         best_traces: dict[str, np.ndarray] | None = None
         for match_index, match in enumerate(top_matches):
             means, traces = region_distances_on_path(
-                user, match["reference"], match["path"]
+                user, match["reference"], match["path"], required_regions
             )
             for region, value in means.items():
                 mean_values[region].append(value)
@@ -263,17 +361,20 @@ class SignEvaluator:
                 best_traces = traces
 
         feedback: list[dict[str, Any]] = []
-        for region in REGIONS:
+        weights = self._region_weights(required_regions)
+        for region in required_regions:
             distance = float(np.median(mean_values[region]))
             threshold = float(thresholds[region])
-            ratio = distance / max(threshold, 1e-8)
+            within_threshold = distance <= threshold
             item: dict[str, Any] = {
                 "region": region,
                 "distance": round(distance, 4),
                 "threshold": round(threshold, 4),
-                "severity": "ok" if ratio <= 1 else "needs_attention",
+                "score": self._region_score(distance, threshold),
+                "weight": weights[region],
+                "severity": "ok" if within_threshold else "needs_attention",
             }
-            if ratio > 1 and best_traces is not None:
+            if not within_threshold and best_traces is not None:
                 segment = largest_error_segment(best_traces[region], threshold)
                 if segment is not None:
                     start, end = segment
@@ -310,7 +411,10 @@ class SignEvaluator:
     ) -> EvaluationResult:
         label = self._resolve_label(target_label)
         user_sequence = load_landmark_sequence(sequence_path)
-        tracking = tracking_report(user_sequence)
+        details = self.calibration["labels"][label]
+        references = self._load_references(label)
+        required_regions, hand_presence = self._required_regions(label, references)
+        tracking = tracking_report(user_sequence, required_regions)
         recognition_result = self._recognition_status(label, recognition)
         base_payload: dict[str, Any] = {
             "target_label": label,
@@ -318,6 +422,28 @@ class SignEvaluator:
             "tracking": tracking,
             "recognition": recognition_result,
         }
+        if recognition_result["status"] == "mismatch":
+            base_payload.update(
+                {
+                    "status": "incorrect_label",
+                    "form": {
+                        "status": "not_scored",
+                        "score": None,
+                        "decision_source": "recognition_mismatch",
+                    },
+                    "feedback": [
+                        {
+                            "region": "recognition",
+                            "severity": "needs_attention",
+                            "message": (
+                                f"Hệ thống nhận diện thành từ {recognition_result['predicted_label']}, "
+                                f"khác từ mục tiêu {label}. Hãy thử lại từ mục tiêu."
+                            ),
+                        }
+                    ],
+                }
+            )
+            return EvaluationResult(base_payload)
         if tracking["status"] == "invalid":
             base_payload.update(
                 {
@@ -332,26 +458,11 @@ class SignEvaluator:
                 }
             )
             return EvaluationResult(base_payload)
-        if tracking["status"] == "low_quality":
-            base_payload.update(
-                {
-                    "status": "not_scored",
-                    "form": {"status": "not_scored", "score": None},
-                    "feedback": [
-                        {
-                            "severity": "blocking",
-                            "message": "Video thiếu landmark tay ở quá nhiều frame để chấm tin cậy.",
-                        }
-                    ],
-                }
-            )
-            return EvaluationResult(base_payload)
-
-        details = self.calibration["labels"][label]
-        references = self._load_references(label)
         matches: list[dict[str, Any]] = []
         for filename, reference in references:
-            distance, path = calculate_dtw(user_sequence.landmarks, reference.landmarks)
+            distance, path = calculate_dtw(
+                user_sequence.landmarks, reference.landmarks, required_regions
+            )
             matches.append(
                 {
                     "file": filename,
@@ -365,37 +476,81 @@ class SignEvaluator:
         comparison_distance = float(
             np.mean([match["distance"] for match in matches[:top_k]])
         )
-        reference_distribution = np.asarray(details["loo_top_k_distances"], dtype=float)
-        if len(reference_distribution) == 0:
-            raise ValueError(f"No leave-one-out calibration values for '{label}'.")
-        percentile_score = float(
-            100 * np.mean(reference_distribution >= comparison_distance)
+        reference_distribution = self._reference_distribution(
+            label, references, required_regions, top_k
+        )
+        percentile_score = (
+            round(float(100 * np.mean(reference_distribution >= comparison_distance)), 2)
+            if len(reference_distribution) else None
         )
         low_sample = details["quality"] == "low_sample"
-        validation = self._validation_for_label(label)
+        feedback, threshold_info = self._build_feedback(
+            label, user_sequence.landmarks, matches, low_sample, required_regions
+        )
+        region_scores = {
+            item["region"]: item["score"] for item in feedback if "score" in item
+        }
+        weights = self._region_weights(required_regions)
         score = (
-            self._validation_score(comparison_distance, validation)
-            if validation is not None else round(percentile_score, 2)
+            round(sum(region_scores[region] * weights[region] for region in required_regions), 2)
+            if all(region in region_scores for region in required_regions) else None
         )
         form = {
-            "status": self._form_status(score, low_sample, validation),
+            "status": self._form_status(score),
             "score": score,
-            "reference_percentile": round(percentile_score, 2),
+            "region_scores": region_scores,
+            "region_weights": weights,
+            "reference_percentile": percentile_score,
             "comparison_distance": round(comparison_distance, 6),
             "reference_count": details["reference_count"],
             "calibration_count": len(reference_distribution),
             "calibration_quality": details["quality"],
+            "required_regions": list(required_regions),
+            "ignored_regions": [
+                region for region in REGIONS if region not in required_regions
+            ],
+            "hand_mode": (
+                "two_hands"
+                if {"left_hand", "right_hand"}.issubset(required_regions)
+                else "single_left"
+                if "left_hand" in required_regions
+                else "single_right"
+            ),
+            "reference_hand_presence": {
+                region: round(value, 4) for region, value in hand_presence.items()
+            },
             "decision_source": (
-                "labeled_user_validation" if validation is not None else "reference_distribution"
+                "weighted_region_thresholds" if score is not None
+                else "insufficient_region_calibration"
             ),
         }
-        if validation is not None:
-            form["validation"] = validation
-        feedback, threshold_info = self._build_feedback(
-            label, user_sequence.landmarks, matches, low_sample
-        )
-        if recognition_result["status"] == "mismatch":
-            status = "incorrect_label"
+        if tracking.get("warning"):
+            feedback.insert(
+                0,
+                {
+                    "region": "tracking",
+                    "severity": "warning",
+                    "message": (
+                        "Camera chưa theo dõi ổn định các tay cần dùng; "
+                        "hệ thống vẫn chấm nhưng điểm có thể bị ảnh hưởng bởi "
+                        "landmark bị thiếu. Hãy giữ tay trong khung hình rõ hơn."
+                    ),
+                },
+            )
+        if recognition_result["status"] == "uncertain":
+            feedback.insert(
+                0,
+                {
+                    "region": "recognition",
+                    "severity": "warning",
+                    "message": (
+                        "Chưa xác nhận được đúng từ mục tiêu; "
+                        "điểm dưới đây chỉ đánh giá dáng động tác để luyện tập."
+                    ),
+                },
+            )
+        if score is None:
+            status = "not_scored"
         elif recognition_result["status"] == "match":
             status = (
                 "correct"
