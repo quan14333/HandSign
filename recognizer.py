@@ -13,6 +13,45 @@ import numpy as np
 MODEL_NAME = "star092304/vi-sign-language-videomae-base"
 NUM_FRAMES = 16
 
+# The published checkpoint has several mojibake label strings in config.json.
+# Keep the checkpoint's class IDs unchanged and repair display text only.
+LABEL_TEXT_CORRECTIONS = {
+    1: "Ban ngày",
+    5: "Bàn tay",
+    14: "Chúng ta",
+    15: "Chân",
+    16: "Chào",
+    27: "Cá",
+    28: "Cách ly",
+    31: "Ghét",
+    32: "Giúp",
+    36: "Hôm nay",
+    39: "Khai báo",
+    40: "Khu cách ly",
+    41: "Khóc",
+    50: "Ngón tay",
+    51: "Nhà",
+    52: "Nhìn",
+    55: "Nói",
+    56: "Nôn ói",
+    59: "Phía sau",
+    69: "Thích",
+    77: "Tôi",
+    84: "Xe máy",
+    87: "Xin phép",
+}
+
+
+def _repair_label_text(model: Any) -> None:
+    """Repair corrupted Vietnamese text without changing checkpoint class IDs."""
+
+    id2label = {int(index): label for index, label in model.config.id2label.items()}
+    for index, label in LABEL_TEXT_CORRECTIONS.items():
+        if index in id2label:
+            id2label[index] = label
+    model.config.id2label = id2label
+    model.config.label2id = {label: index for index, label in id2label.items()}
+
 
 @lru_cache(maxsize=1)
 def _load_model() -> tuple[Any, Any, Any]:
@@ -50,6 +89,7 @@ def _load_model() -> tuple[Any, Any, Any]:
             model.state_dict()[weight_name].shape[0], dtype=model.state_dict()[weight_name].dtype
         )
     model.load_state_dict(converted, strict=False)
+    _repair_label_text(model)
     model.eval()
     return processor, model, torch
 
