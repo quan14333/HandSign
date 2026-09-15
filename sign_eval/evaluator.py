@@ -63,8 +63,11 @@ class SignEvaluator:
             )
         with calibration_path.open("r", encoding="utf-8") as calibration_file:
             self.calibration = json.load(calibration_file)
-        if self.calibration.get("format_version") != 2:
-            raise ValueError("Unsupported calibration format. Rebuild calibration data.")
+        if self.calibration.get("format_version") != 3:
+            raise ValueError(
+                "Calibration format 3 with precomputed regional thresholds is required. "
+                "Run python build_calibration.py to rebuild calibration data."
+            )
         configured_root = Path(self.calibration["reference_root"])
         self.reference_root = Path(reference_root) if reference_root else configured_root
         self._label_lookup = {
@@ -80,7 +83,6 @@ class SignEvaluator:
         self._validation_lookup = {
             canonical_label(label): details for label, details in self.validation_labels.items()
         }
-        self._region_threshold_cache: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
         self._active_distribution_cache: dict[
             tuple[str, tuple[str, ...]], np.ndarray
         ] = {}
@@ -114,39 +116,34 @@ class SignEvaluator:
     def _region_thresholds(
         self, label: str, required_regions: tuple[str, ...]
     ) -> dict[str, Any]:
-        """Compute label-specific regional limits lazily and cache them."""
-
-        cache_key = (label, required_regions)
-        if cache_key in self._region_threshold_cache:
-            return self._region_threshold_cache[cache_key]
+        """Read persisted limits; reference-reference DTW belongs in the builder."""
 
         details = self.calibration["labels"][label]
-        samples = details.get("region_pair_samples", [])
-        if len(samples) < 3:
-            result = {"thresholds": None, "sample_count": len(samples)}
-            self._region_threshold_cache[cache_key] = result
-            return result
-
-        region_values = {name: [] for name in required_regions}
-        label_dir = self.reference_root / label
-        for file_a, file_b in samples:
-            sequence_a = load_landmark_sequence(label_dir / file_a).landmarks
-            sequence_b = load_landmark_sequence(label_dir / file_b).landmarks
-            _, path = calculate_dtw(sequence_a, sequence_b, required_regions)
-            means, _ = region_distances_on_path(
-                sequence_a, sequence_b, path, required_regions
+        rebuild_message = (
+            f"Invalid or missing precomputed regional thresholds for '{label}'. "
+            "Run python build_calibration.py to rebuild calibration data."
+        )
+        required_fields = {"required_regions", "region_thresholds", "region_threshold_sample_count"}
+        if not required_fields <= details.keys():
+            raise ValueError(rebuild_message)
+        thresholds = details["region_thresholds"]
+        sample_count = details["region_threshold_sample_count"]
+        if type(sample_count) is not int or sample_count < 0:
+            raise ValueError(rebuild_message)
+        if thresholds is None:
+            if sample_count >= 3:
+                raise ValueError(rebuild_message)
+        elif (
+            sample_count < 3
+            or not isinstance(thresholds, dict)
+            or set(thresholds) != set(required_regions)
+            or any(
+                type(value) not in (int, float) or not np.isfinite(value) or value < 0
+                for value in thresholds.values()
             )
-            for region, value in means.items():
-                region_values[region].append(value)
-
-        thresholds = {
-            region: round(float(np.quantile(values, 0.90)), 6)
-            for region, values in region_values.items()
-            if values
-        }
-        result = {"thresholds": thresholds, "sample_count": len(samples)}
-        self._region_threshold_cache[cache_key] = result
-        return result
+        ):
+            raise ValueError(rebuild_message)
+        return {"thresholds": thresholds, "sample_count": sample_count}
 
     def _required_regions(
         self, label: str, references: list[tuple[str, LandmarkSequence]]

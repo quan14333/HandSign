@@ -1,5 +1,25 @@
 # Giải thích thay đổi và workflow HandSign
 
+## Cập nhật: tính sẵn ngưỡng vùng khi build
+
+`python build_calibration.py` hiện tạo calibration định dạng 3. Với mỗi label,
+builder chọn các cặp mẫu như trước, suy ra vùng cần chấm và gọi
+`calculate_region_thresholds()` để tính P90. Kết quả được lưu cùng label trong
+`artifacts/label_calibration.json`: `required_regions`, `region_thresholds` và
+`region_threshold_sample_count`. Dưới 3 cặp thì ngưỡng là null và label chưa đủ
+dữ liệu để chấm vùng.
+
+`SignEvaluator._region_thresholds()` chỉ đọc các giá trị đã lưu. Mỗi user mới
+vẫn được so với mẫu chuẩn, nhưng không tính lại ngưỡng từ các cặp chuẩn.
+Calibration cũ hoặc thiếu/sai ngưỡng yêu cầu chạy lại `python build_calibration.py`.
+Ngưỡng P90, công thức điểm và cách tạo feedback được giữ nguyên. Các mô tả tính
+ngưỡng lúc chấm ở phần lịch sử bên dưới không còn áp dụng.
+
+Khi đổi dữ liệu chuẩn hoặc cách tính khoảng cách, cần cập nhật cache
+`result2/info.npy` tương ứng rồi build lại; builder không tự tạo lại cache này.
+Phân phối DTW tham khảo khi chỉ chấm một tay vẫn có thể được tính lúc đánh giá;
+đây là phần riêng, không phải ngưỡng vùng dùng ra điểm.
+
 ## Cập nhật: điểm vùng có trọng số
 
 Nhận diện khác target và confidence ≥ 70% hiện trả `incorrect_label`, score

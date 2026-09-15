@@ -25,7 +25,7 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
                 np.save(label_dir / filename, reference)
 
             calibration = {
-                "format_version": 2,
+                "format_version": 3,
                 "reference_root": str(root / "references"),
                 "labels": {
                     label: {
@@ -38,6 +38,9 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
                             ["a.npy", "c.npy"],
                             ["b.npy", "c.npy"],
                         ],
+                        "required_regions": ["right_hand", "face"],
+                        "region_thresholds": {"right_hand": 0.0, "face": 0.0},
+                        "region_threshold_sample_count": 3,
                         "quality": "ok",
                     }
                 },
@@ -122,6 +125,9 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
             evaluator.calibration["labels"][label]["required_regions"] = [
                 "left_hand", "right_hand", "face"
             ]
+            evaluator.calibration["labels"][label]["region_thresholds"] = {
+                "left_hand": 0.0, "right_hand": 0.0, "face": 0.0
+            }
             for detected_frames in (0, 1, 2):
                 with self.subTest(detected_frames=detected_frames):
                     sparse_validity = np.zeros((5, 3), dtype=bool)

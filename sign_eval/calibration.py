@@ -11,7 +11,13 @@ from typing import Any
 
 import numpy as np
 
-from .landmarks import load_landmark_sequence
+from .landmarks import (
+    DEFAULT_REQUIRED_REGIONS,
+    calculate_dtw,
+    infer_required_regions,
+    load_landmark_sequence,
+    region_distances_on_path,
+)
 
 
 DEFAULT_REFERENCE_ROOT = Path("data/landmarks (1)")
@@ -74,17 +80,43 @@ def _select_region_pair_samples(
     return [[stable_pairs[index][0], stable_pairs[index][1]] for index in indices]
 
 
+def calculate_region_thresholds(
+    references: dict[str, np.ndarray],
+    pair_samples: list[list[str]],
+    required_regions: tuple[str, ...],
+) -> dict[str, float] | None:
+    """Precompute each active region's P90 limit from selected reference pairs."""
+
+    if len(pair_samples) < 3:
+        return None
+    region_values: dict[str, list[float]] = {region: [] for region in required_regions}
+    for file_a, file_b in pair_samples:
+        sequence_a, sequence_b = references[file_a], references[file_b]
+        _, path = calculate_dtw(sequence_a, sequence_b, required_regions)
+        means, _ = region_distances_on_path(
+            sequence_a, sequence_b, path, required_regions
+        )
+        for region, value in means.items():
+            region_values[region].append(value)
+    return {
+        region: round(float(np.quantile(values, 0.90)), 6)
+        for region, values in region_values.items()
+    }
+
+
 def build_calibration(
     reference_root: str | Path = DEFAULT_REFERENCE_ROOT,
     pair_info_path: str | Path = DEFAULT_PAIR_INFO,
     output_path: str | Path = DEFAULT_OUTPUT,
     top_k: int = 3,
 ) -> dict[str, Any]:
-    """Create leave-one-out, label-specific distance distributions.
+    """Create label-specific distance distributions and regional thresholds.
 
     The existing pairwise DTW cache is used only after invalid and duplicate
     references are excluded. The scoring statistic is intentionally the same
     top-k mean used for a learner, avoiding the old apples-to-oranges baseline.
+    Regional limits use the same active-region alignment and P90 as feedback,
+    but are computed here so evaluation only needs to read the saved values.
     """
 
     reference_root = Path(reference_root)
@@ -122,6 +154,16 @@ def build_calibration(
             if distances:
                 loo_distances.append(float(np.mean(distances[: min(top_k, len(distances))])))
 
+        references = {
+            file: load_landmark_sequence(reference_root / label / file).landmarks
+            for file in files
+        }
+        required_regions = (
+            infer_required_regions(list(references.values()))[0]
+            if references else DEFAULT_REQUIRED_REGIONS
+        )
+        pair_samples = _select_region_pair_samples(pairs)
+        thresholds = calculate_region_thresholds(references, pair_samples, required_regions)
         sample_count = len(files)
         labels[label] = {
             "reference_files": files,
@@ -129,12 +171,15 @@ def build_calibration(
             "pair_count": len(pairs),
             "top_k": top_k,
             "loo_top_k_distances": sorted(loo_distances),
-            "region_pair_samples": _select_region_pair_samples(pairs),
+            "region_pair_samples": pair_samples,
+            "required_regions": list(required_regions),
+            "region_thresholds": thresholds,
+            "region_threshold_sample_count": len(pair_samples),
             "quality": "ok" if sample_count >= 10 else "low_sample",
         }
 
     payload: dict[str, Any] = {
-        "format_version": 2,
+        "format_version": 3,
         "reference_root": str(reference_root),
         "pair_info_path": str(pair_info_path),
         "top_k": top_k,
@@ -147,6 +192,9 @@ def build_calibration(
             "excluded_count": len(exclusions),
             "low_sample_labels": sum(
                 details["quality"] == "low_sample" for details in labels.values()
+            ),
+            "uncalibrated_region_labels": sum(
+                details["region_thresholds"] is None for details in labels.values()
             ),
         },
     }

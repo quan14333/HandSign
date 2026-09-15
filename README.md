@@ -14,7 +14,7 @@ separate decisions so a weak motion score is never presented as a wrong sign:
 ```text
 sign_eval/
   landmarks.py       Landmark validation, normalization, DTW, and tracking checks
-  calibration.py     Builds per-label leave-one-out calibration data
+  calibration.py     Builds per-label distributions and regional thresholds
   evaluator.py       Structured semantic, form, and feedback evaluation
 record.py            Webcam capture; writes sequence.npy and record.npz
 build_calibration.py Creates artifacts/label_calibration.json
@@ -39,6 +39,19 @@ python build_calibration.py
 The calibration builder removes invalid all-zero sequences and exact duplicates
 before generating the score distributions. It uses `result2/info.npy`, so run
 it again whenever the reference corpus changes.
+
+Calibration format 3 also saves `required_regions`, `region_thresholds`, and
+`region_threshold_sample_count` for every label in `artifacts/label_calibration.json`.
+The builder computes the same P90 regional limits from the selected reference
+pairs that evaluation previously computed on demand. Evaluation reads these
+limits directly; it does not recompute them for a new user recording. Labels
+with fewer than three selected pairs store null thresholds and remain unscored.
+
+After upgrading from format 2, run `python build_calibration.py` once. Old files
+or missing/inconsistent regional thresholds produce a rebuild instruction.
+Rebuild after changing the reference data, normalization, or distance algorithm;
+the pair cache in `result2/info.npy` must also match those references and distances.
+The builder uses that cache, but does not regenerate it.
 
 ## Capture and evaluate
 
@@ -91,16 +104,21 @@ Matching labels retain the existing confidence >= 50% and margin >= 12% checks
 - `form.reference_percentile`, `form.comparison_distance`: DTW diagnostics,
   retained for reference only; neither determines the practice score.
 - `form.required_regions`, `form.ignored_regions`, and `form.hand_mode`: explain
-  whether the label was evaluated as a one-hand or two-hand sign. A calibration
-  label may provide `required_regions` explicitly to override inference.
+  whether the label was evaluated as a one-hand or two-hand sign. The builder
+  saves the inferred `required_regions` with thresholds for exactly those regions.
   Automatic inference includes a hand when its median presence across reference
-  clips is at least 10% (previously 20%).
+  clips is at least 10% (previously 20%). Custom region selections need matching
+  thresholds recomputed with `calculate_region_thresholds`; do not change the
+  region list alone.
 - `form.decision_source`: `weighted_region_thresholds` for the new score, or
   `insufficient_region_calibration` when no regional score can be computed.
 - `feedback`: per-region distance, label-specific threshold, and the most
   problematic time range of the motion.
 
 Use `--rebuild-calibration` after adding or removing reference files.
+User-to-reference DTW still runs for every recording. The diagnostic reference
+distribution for a non-default region selection may also be computed at runtime;
+that distribution is separate from the saved regional scoring thresholds.
 
 ## Regional practice score
 
