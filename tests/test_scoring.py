@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import numpy as np
@@ -6,19 +7,38 @@ from sign_eval.evaluator import SignEvaluator
 
 
 class PracticeScoreTests(unittest.TestCase):
-    def test_different_label_requires_70_percent_confidence(self) -> None:
+    def test_different_label_always_requires_retry(self) -> None:
         evaluator = SignEvaluator.__new__(SignEvaluator)
-        for confidence, expected in [(0.69999, "uncertain"), (0.7, "mismatch"),
-                                     (0.95, "mismatch"), (None, "uncertain"),
-                                     (float("nan"), "uncertain")]:
+        for confidence in (0.01, 0.69999, 0.7, 0.95, None, float("nan")):
             with self.subTest(confidence=confidence):
                 result = evaluator._recognition_status("Target", {
                     "predicted_label": "Different", "confidence": confidence,
                 })
-                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["status"], "mismatch")
         self.assertEqual(evaluator._recognition_status("Target", {
-            "predicted_label": " target ", "confidence": 0.6, "margin": 0.2,
+            "predicted_label": " target ", "confidence": 0.7, "margin": 0.2,
         })["status"], "match")
+
+    def test_matching_label_can_score_regardless_of_confidence_and_margin(self) -> None:
+        evaluator = SignEvaluator.__new__(SignEvaluator)
+        self.assertEqual(evaluator._recognition_status("Target", None)["status"], "not_run")
+        for confidence, margin in [
+            (0.7, 0.12), (0.1, 0.01), (0.9, 0.119999), (None, None),
+            (0.9, float("nan")), (float("inf"), 0.2),
+            (True, 0.2), ("bad", 0.2), (0.9, "bad"), (0.9, 1.1),
+            (0.7, 0.8), (0.9, -0.2),
+        ]:
+            with self.subTest(confidence=confidence, margin=margin):
+                result = evaluator._recognition_status("Target", {
+                    "predicted_label": " target ", "confidence": confidence, "margin": margin,
+                })
+                self.assertEqual(result["status"], "match")
+                # Public results must always be strict JSON, even on malformed input.
+                json.dumps(result, allow_nan=False)
+        for label in (None, "", " ", 42):
+            self.assertEqual(evaluator._recognition_status("Target", {
+                "predicted_label": label, "confidence": 0.9, "margin": 0.5,
+            })["status"], "uncertain")
 
     def setUp(self) -> None:
         self.validation = {

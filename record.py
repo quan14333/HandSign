@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+import argparse
+import math
 from pathlib import Path
 import time
 
@@ -10,6 +13,10 @@ import mediapipe as mp
 import numpy as np
 
 from sign_eval.landmarks import trim_to_active_hands, zscore_normalize_sequence
+from sign_eval.paths import PROJECT_ROOT, USER_ROOT
+from sign_eval.framing import (
+    GUIDE_BOUNDS, CaptureGate, FramingResult, assess_framing,
+)
 
 
 MAX_HANDS = 2
@@ -34,26 +41,35 @@ HAND_CONNECTIONS = [
 ]
 
 
-def create_landmarkers() -> tuple[object, object]:
+def create_landmarkers(stack: ExitStack) -> tuple[object, object, object]:
     base_options = mp.tasks.BaseOptions
     vision = mp.tasks.vision
     hand_options = vision.HandLandmarkerOptions(
-        base_options=base_options(model_asset_path="hand_landmarker.task"),
+        base_options=base_options(model_asset_path=str(PROJECT_ROOT / "hand_landmarker.task")),
         running_mode=vision.RunningMode.IMAGE,
         num_hands=MAX_HANDS,
         min_hand_detection_confidence=0.3,
         min_hand_presence_confidence=0.3,
     )
     face_options = vision.FaceLandmarkerOptions(
-        base_options=base_options(model_asset_path="face_landmarker.task"),
+        base_options=base_options(model_asset_path=str(PROJECT_ROOT / "face_landmarker.task")),
         running_mode=vision.RunningMode.IMAGE,
         num_faces=1,
         min_face_detection_confidence=0.5,
         min_face_presence_confidence=0.5,
     )
+    pose_options = vision.PoseLandmarkerOptions(
+        base_options=base_options(model_asset_path=str(PROJECT_ROOT / "pose_landmarker_lite.task")),
+        running_mode=vision.RunningMode.VIDEO,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
     return (
-        vision.HandLandmarker.create_from_options(hand_options),
-        vision.FaceLandmarker.create_from_options(face_options),
+        stack.enter_context(vision.HandLandmarker.create_from_options(hand_options)),
+        stack.enter_context(vision.FaceLandmarker.create_from_options(face_options)),
+        stack.enter_context(vision.PoseLandmarker.create_from_options(pose_options)),
     )
 
 
@@ -124,97 +140,126 @@ def trim_video(video_path: Path, output_path: Path, start: int, end: int) -> Non
     writer = cv2.VideoWriter(
         str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
     )
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
-    for _ in range(start, end + 1):
-        ok, frame = capture.read()
-        if not ok:
-            break
-        writer.write(frame)
-    capture.release()
-    writer.release()
+    try:
+        if not writer.isOpened():
+            raise RuntimeError(f"Unable to create video: {output_path}")
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        for _ in range(start, end + 1):
+            ok, frame = capture.read()
+            if not ok:
+                raise RuntimeError("Video is incomplete; please record the sign again.")
+            writer.write(frame)
+    finally:
+        capture.release()
+        writer.release()
+
+
+def draw_capture_guide(
+    frame: np.ndarray, framing: FramingResult, gate: CaptureGate, frame_count: int, now: float,
+) -> np.ndarray:
+    """Put single-pass text in separate panels outside the camera image."""
+
+    height, width = frame.shape[:2]
+    preview = cv2.copyMakeBorder(frame, 64, 78, 0, 0, cv2.BORDER_CONSTANT, value=(24, 24, 24))
+    color = (0, 200, 0) if framing.ready else (0, 180, 255)
+    x_min, y_min, x_max, y_max = GUIDE_BOUNDS
+    cv2.rectangle(preview, (int(x_min * width), 64 + int(y_min * height)),
+                  (int(x_max * width), 64 + int(y_max * height)), color, 2)
+    if gate.recording:
+        status = f"DANG QUAY: {frame_count} frames | Q: dung"
+    elif gate.countdown_until is not None:
+        remaining = max(1, math.ceil(gate.countdown_until - now))
+        status = f"Bat dau sau {remaining}... Giu mat va hai vai trong hinh"
+        cv2.putText(preview, str(remaining), (width // 2 - 30, 64 + height // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255), 4, cv2.LINE_AA)
+    elif framing.ready:
+        status = "GOC CAMERA OK - Nhan S de quay | Q: thoat"
+    else:
+        status = "CAN CHINH GOC CAMERA - Cho khung xanh | Q: thoat"
+    detail = "Bam vao cua so camera de dung phim S / Q"
+    for text, y, text_color in [
+        (status, 38, color), (framing.message, height + 94, (235, 235, 235)),
+        (detail, height + 123, (180, 180, 180)),
+    ]:
+        text_width = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1, 1)[0][0]
+        scale = min(0.65, max(0.1, (width - 24) / max(text_width, 1)))
+        cv2.putText(preview, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, text_color, 1, cv2.LINE_AA)
+    return preview
 
 
 def record_sequence() -> tuple[np.ndarray, np.ndarray, int, int] | None:
-    """Capture landmarks, trim to the active signing portion, and normalize it."""
+    """Check framing, capture an uninterrupted sign, then trim and normalize."""
 
-    capture = cv2.VideoCapture(0)
-    if not capture.isOpened():
-        print("Unable to open webcam.")
-        return None
-    output_dir = Path("data/user/video_user")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    original_video_path = output_dir / "original_video.mp4"
-    writer = cv2.VideoWriter(
-        str(original_video_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        30,
-        (int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))),
-    )
-    hand_landmarker, face_landmarker = create_landmarkers()
     raw_frames: list[np.ndarray] = []
     validity_frames: list[np.ndarray] = []
-    recording = False
-    countdown_started_at: float | None = None
-    print("Press S to start recording and Q to stop.")
-
-    try:
+    gate = CaptureGate()
+    print("Adjust the camera until your face and both shoulders are visible (green frame).")
+    print("Press S when green for a 3-second countdown. Q finishes and evaluates.")
+    with ExitStack() as stack:
+        capture = cv2.VideoCapture(0)
+        stack.callback(capture.release)
+        stack.callback(cv2.destroyAllWindows)
+        if not capture.isOpened():
+            print("Unable to open webcam.")
+            return None
+        hand_landmarker, face_landmarker, pose_landmarker = create_landmarkers(stack)
+        writer = None
+        previous_timestamp_ms = -1
+        started_at = time.perf_counter()
         while True:
             ok, frame = capture.read()
             if not ok:
                 print("Unable to read a webcam frame.")
                 break
             frame = cv2.flip(frame, 1)
-            if countdown_started_at is not None:
-                remaining = 3 - int(time.perf_counter() - countdown_started_at)
-                if remaining > 0:
-                    cv2.putText(
-                        frame, str(remaining), (frame.shape[1] // 2 - 40, frame.shape[0] // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 8,
-                    )
-                else:
-                    countdown_started_at = None
-                    recording = True
-                    raw_frames.clear()
-                    validity_frames.clear()
-                    print("Recording started.")
+            image = mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+            )
+            timestamp_ms = max(previous_timestamp_ms + 1,
+                               int((time.perf_counter() - started_at) * 1000))
+            previous_timestamp_ms = timestamp_ms
+            pose_result = pose_landmarker.detect_for_video(image, timestamp_ms)
+            face_result = face_landmarker.detect(image)
+            face, face_validity = extract_face_landmarks(face_result)
+            framing = assess_framing(
+                pose_result.pose_landmarks[0] if pose_result.pose_landmarks else [],
+                face_detected=face_validity,
+            )
+            now = time.perf_counter()
+            gate.update(framing.ready, now)
 
-            if recording:
-                writer.write(frame)
-                image = mp.Image(
-                    image_format=mp.ImageFormat.SRGB,
-                    data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                )
+            if gate.recording:
+                if writer is None:
+                    output_dir = USER_ROOT / "video_user"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    writer = cv2.VideoWriter(
+                        str(output_dir / "original_video.mp4"),
+                        cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                        (frame.shape[1], frame.shape[0]),
+                    )
+                    stack.callback(writer.release)
+                    if not writer.isOpened():
+                        raise RuntimeError("Unable to create the webcam recording file.")
+                    print("Recording started.")
                 hand_result = hand_landmarker.detect(image)
-                face_result = face_landmarker.detect(image)
                 hands, hand_validity = extract_hand_landmarks(hand_result)
-                face, face_validity = extract_face_landmarks(face_result)
                 raw_frames.append(np.concatenate([hands.reshape(-1, 2), face], axis=0))
                 validity_frames.append(
                     np.array([hand_validity[0], hand_validity[1], face_validity], dtype=bool)
                 )
+                writer.write(frame)
                 draw_landmarks(frame, hand_result, face_result)
-                cv2.putText(
-                    frame, f"RECORDING: {len(raw_frames)} frames", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2,
-                )
-            elif countdown_started_at is None:
-                cv2.putText(
-                    frame, "Press S to start", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2,
-                )
-
-            cv2.imshow("Sign Language Recorder", frame)
+            preview = draw_capture_guide(frame, framing, gate, len(raw_frames), now)
+            cv2.imshow("Sign Language Recorder", preview)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("s") and not recording and countdown_started_at is None:
-                countdown_started_at = time.perf_counter()
-            elif key == ord("q"):
+            if key in (ord("s"), ord("S")):
+                gate.request_start(now)
+            elif key in (ord("q"), ord("Q")):
                 break
-    finally:
-        writer.release()
-        capture.release()
-        cv2.destroyAllWindows()
-        hand_landmarker.close()
-        face_landmarker.close()
+            if cv2.getWindowProperty("Sign Language Recorder", cv2.WND_PROP_VISIBLE) < 1:
+                break
 
     if not raw_frames:
         print("No frames were recorded.")
@@ -228,22 +273,76 @@ def record_sequence() -> tuple[np.ndarray, np.ndarray, int, int] | None:
         return None
     active_indices = np.flatnonzero(validity[:, :2].any(axis=1))
     start, end = int(active_indices[0]), int(active_indices[-1])
+    if len(trimmed_raw) < 2:
+        print("Recording is too short; perform the full sign and try again.")
+        return None
     normalized = zscore_normalize_sequence(trimmed_raw)
     return normalized, trimmed_validity, start, end
 
 
-def main() -> None:
-    recording = record_sequence()
-    if recording is None:
-        return
+def save_recording(recording: tuple[np.ndarray, np.ndarray, int, int]) -> tuple[Path, Path]:
+    """Persist the matching landmarks/video before starting recognition."""
     sequence, validity, start, end = recording
-    sequence_dir = Path("data/user/sequence_user")
-    video_dir = Path("data/user/video_user")
+    sequence_dir = USER_ROOT / "sequence_user"
+    video_dir = USER_ROOT / "video_user"
     sequence_dir.mkdir(parents=True, exist_ok=True)
     np.save(sequence_dir / "sequence.npy", sequence)
     np.savez_compressed(sequence_dir / "record.npz", landmarks=sequence, validity=validity)
     trim_video(video_dir / "original_video.mp4", video_dir / "trimmed_video.mp4", start, end)
-    print(f"Saved {len(sequence)} normalized frames to {sequence_dir / 'record.npz'}.")
+    return sequence_dir / "record.npz", video_dir / "trimmed_video.mp4"
+
+
+def main() -> None:
+    from evaluate import evaluate_recording
+    from sign_eval.desktop import choose_target_label, show_sample_window, show_evaluation_window, show_notice
+    from sign_eval.evaluator import SignEvaluator, canonical_label
+
+    parser = argparse.ArgumentParser(description="Record a sign and show AI evaluation in a desktop window.")
+    parser.add_argument("--target-label", help="Target sign; omit to choose it in a window.")
+    parser.add_argument(
+        "--sample-video-root", type=Path,
+        help="Optional folder containing <label>.mp4 files or one subfolder per label.",
+    )
+    args = parser.parse_args()
+    try:
+        labels = SignEvaluator().available_labels()
+        if args.target_label:
+            lookup = {canonical_label(label): label for label in labels}
+            target_label = lookup.get(canonical_label(args.target_label))
+            if target_label is None:
+                raise ValueError(f"Không tìm thấy từ mục tiêu: {args.target_label}")
+        else:
+            target_label = choose_target_label(labels)
+    except Exception as error:
+        show_notice("Không thể bắt đầu", str(error), error=True)
+        return
+    while target_label is not None:
+        sample_action = show_sample_window(target_label, args.sample_video_root)
+        if sample_action == "choose_another":
+            target_label = choose_target_label(labels)
+            continue
+        if not sample_action:
+            return
+        break
+    if target_label is None:
+        return
+
+    while True:
+        try:
+            recording = record_sequence()
+        except Exception as error:
+            show_notice("Không thể quay video", str(error), error=True)
+            return
+        if recording is None:
+            show_notice("Chưa có video để chấm", "Lần quay chưa có đủ dữ liệu tay hợp lệ. Chưa chạy đánh giá.")
+            return
+
+        def process() -> dict:
+            sequence_path, video_path = save_recording(recording)
+            return evaluate_recording(target_label, sequence_path, video_path)
+
+        if not show_evaluation_window(process, target_label):
+            break
 
 
 if __name__ == "__main__":

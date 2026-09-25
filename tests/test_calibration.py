@@ -113,7 +113,9 @@ class PrecomputedThresholdTests(unittest.TestCase):
         self.assertEqual(self.payload["summary"]["uncalibrated_region_labels"], 2)
         user_path = self.root / "user.npy"
         np.save(user_path, self.sequences["Sparse"]["0.npy"])
-        result = self.evaluator().evaluate(user_path, "Sparse").to_dict()
+        result = self.evaluator().evaluate(user_path, "Sparse", {
+            "predicted_label": "Sparse", "confidence": 0.9, "margin": 0.5,
+        }).to_dict()
         self.assertIsNone(result["form"]["score"])
         self.assertEqual(result["status"], "not_scored")
         self.assertEqual(result["feedback_calibration"], {"thresholds": None, "sample_count": 1})

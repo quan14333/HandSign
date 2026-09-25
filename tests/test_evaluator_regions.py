@@ -74,23 +74,37 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
             self.assertEqual(result["form"]["score"], 100)
             self.assertEqual(result["form"]["region_weights"], {"right_hand": 0.8, "face": 0.2})
 
-            # A perfect landmark match cannot override a confident wrong label.
-            with patch("sign_eval.evaluator.calculate_dtw") as dtw:
-                result = evaluator.evaluate(user_path, label, {
-                    "predicted_label": "Different", "confidence": 0.7,
-                }).to_dict()
-                dtw.assert_not_called()
-            self.assertEqual(result["status"], "incorrect_label")
-            self.assertIsNone(result["form"]["score"])
-            self.assertEqual([item["region"] for item in result["feedback"]], ["recognition"])
-            result = evaluator.evaluate(user_path, label, {
-                "predicted_label": "Different", "confidence": 0.69999,
-            }).to_dict()
-            self.assertEqual(result["status"], "needs_label_confirmation")
-            self.assertEqual(result["form"]["score"], 100)
-            self.assertTrue(any(item.get("region") == "recognition"
-                                and item["severity"] == "warning"
-                                for item in result["feedback"]))
+            # A perfect landmark match cannot override a different predicted label,
+            # even if confidence is low or absent.
+            for confidence in (0.1, 0.7, None):
+                with patch("sign_eval.evaluator.calculate_dtw") as dtw:
+                    result = evaluator.evaluate(user_path, label, {
+                        "predicted_label": "Different", "confidence": confidence,
+                    }).to_dict()
+                    dtw.assert_not_called()
+                self.assertEqual(result["status"], "incorrect_label")
+                self.assertIsNone(result["form"]["score"])
+                self.assertEqual([item["region"] for item in result["feedback"]], ["recognition"])
+            for recognition in [
+                None,
+                {}, {"predicted_label": " "}, {"predicted_label": None},
+            ]:
+                with self.subTest(recognition=recognition), patch("sign_eval.evaluator.calculate_dtw") as dtw:
+                    result = evaluator.evaluate(user_path, label, recognition).to_dict()
+                    dtw.assert_not_called()
+                    self.assertEqual(result["status"], "needs_label_confirmation")
+                    self.assertIsNone(result["form"]["score"])
+                    self.assertNotIn("region_scores", result["form"])
+                    self.assertTrue(all("score" not in item for item in result["feedback"]))
+                    self.assertEqual(result["feedback"][0]["severity"], "blocking")
+
+            for recognition in [
+                {"predicted_label": " one HAND ", "confidence": 0.1, "margin": 0.01},
+                {"predicted_label": label},
+            ]:
+                result = evaluator.evaluate(user_path, label, recognition).to_dict()
+                self.assertEqual(result["status"], "correct")
+                self.assertEqual(result["form"]["score"], 100)
 
             # The user's example must be scored from regional limits even when
             # the independent DTW percentile or an old validation disagrees.
@@ -116,7 +130,9 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
             with patch.object(evaluator, "_region_thresholds", return_value={
                 "thresholds": None, "sample_count": 2,
             }):
-                result = evaluator.evaluate(user_path, label).to_dict()
+                result = evaluator.evaluate(user_path, label, {
+                    "predicted_label": label, "confidence": 0.9, "margin": 0.5,
+                }).to_dict()
             self.assertIsNone(result["form"]["score"])
             self.assertEqual(result["status"], "not_scored")
 
@@ -136,7 +152,9 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
                     sparse_user = user.copy()
                     sparse_user[detected_frames:, :42] = 0
                     np.savez_compressed(user_path, landmarks=sparse_user, validity=sparse_validity)
-                    result = evaluator.evaluate(user_path, label).to_dict()
+                    result = evaluator.evaluate(user_path, label, {
+                        "predicted_label": label, "confidence": 0.9, "margin": 0.5,
+                    }).to_dict()
                     self.assertEqual(result["tracking"]["status"], "low_quality")
                     self.assertIsNotNone(result["form"]["score"])
                     self.assertEqual(set(result["form"]["region_scores"]),
@@ -146,7 +164,9 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
                                         for item in result["feedback"]))
 
             np.savez_compressed(user_path, landmarks=np.zeros_like(user), validity=validity)
-            result = evaluator.evaluate(user_path, label).to_dict()
+            result = evaluator.evaluate(user_path, label, {
+                "predicted_label": label, "confidence": 0.9, "margin": 0.5,
+            }).to_dict()
             self.assertEqual(result["tracking"]["status"], "invalid")
             self.assertEqual(result["status"], "not_scored")
 

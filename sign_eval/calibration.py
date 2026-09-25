@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from .paths import PROJECT_ROOT, CALIBRATION_PATH, REFERENCE_ROOT
 
 from .landmarks import (
     DEFAULT_REQUIRED_REGIONS,
@@ -20,9 +21,16 @@ from .landmarks import (
 )
 
 
-DEFAULT_REFERENCE_ROOT = Path("data/landmarks (1)")
-DEFAULT_PAIR_INFO = Path("result2/info.npy")
-DEFAULT_OUTPUT = Path("artifacts/label_calibration.json")
+DEFAULT_REFERENCE_ROOT = REFERENCE_ROOT
+DEFAULT_PAIR_INFO = PROJECT_ROOT / "result2/info.npy"
+DEFAULT_OUTPUT = CALIBRATION_PATH
+
+
+def _portable_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(path.resolve())
 
 
 def _file_digest(path: Path) -> str:
@@ -180,8 +188,8 @@ def build_calibration(
 
     payload: dict[str, Any] = {
         "format_version": 3,
-        "reference_root": str(reference_root),
-        "pair_info_path": str(pair_info_path),
+        "reference_root": _portable_path(reference_root),
+        "pair_info_path": _portable_path(pair_info_path),
         "top_k": top_k,
         "labels": labels,
         "exclusions": exclusions,

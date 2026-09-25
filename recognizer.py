@@ -95,39 +95,62 @@ def _load_model() -> tuple[Any, Any, Any]:
 
 
 def _load_video(video_path: str | Path, frame_count: int) -> list[np.ndarray]:
-    from decord import VideoReader, cpu
+    """Sample RGB frames with the same OpenCV backend used by capture/playback."""
+    import cv2
 
-    reader = VideoReader(str(video_path), ctx=cpu(0))
-    if len(reader) == 0:
-        raise ValueError(f"Video has no frames: {video_path}")
-    indices = np.linspace(0, len(reader) - 1, frame_count).astype(int)
-    return list(reader.get_batch(indices).asnumpy())
+    reader = cv2.VideoCapture(str(video_path))
+    try:
+        if not reader.isOpened():
+            raise ValueError(f"Unable to open video: {video_path}")
+        total = int(reader.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total <= 0 or frame_count <= 0:
+            raise ValueError(f"Video has no readable frame count: {video_path}")
+        indices = np.linspace(0, total - 1, frame_count).astype(int)
+        frames = []
+        sample = 0
+        for index in range(total):
+            ok, frame = reader.read()
+            if not ok:
+                raise ValueError(f"Unable to decode frame {index} of {video_path}")
+            if index == indices[sample]:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                while sample < frame_count and indices[sample] == index:
+                    frames.append(rgb.copy())
+                    sample += 1
+            if sample == frame_count:
+                break
+        return frames
+    finally:
+        reader.release()
 
 
 def predict_video(video_path: str | Path, top_k: int = 5) -> dict[str, Any]:
-    """Return calibrated information needed by ``SignEvaluator`` semantics."""
+    """Return model probabilities and the true top-two gap (not calibrated)."""
 
+    if type(top_k) is not int or top_k < 1:
+        raise ValueError("top_k must be a positive integer.")
     processor, model, torch = _load_model()
     frames = _load_video(video_path, NUM_FRAMES)
     inputs = processor(frames, return_tensors="pt")
     with torch.no_grad():
         probabilities = torch.softmax(model(**inputs).logits, dim=-1)[0]
-    count = min(top_k, probabilities.numel())
+    # Always inspect the runner-up, even if the caller only displays top one.
+    count = min(max(top_k, 2), probabilities.numel())
     values, indices = torch.topk(probabilities, k=count)
     predictions = [
         {
             "label": model.config.id2label[index.item()],
-            "confidence": round(float(value.item()), 6),
+            "confidence": float(value.item()),
         }
         for value, index in zip(values, indices)
     ]
     return {
         "predicted_label": predictions[0]["label"],
         "confidence": predictions[0]["confidence"],
-        "margin": round(
-            predictions[0]["confidence"] - predictions[1]["confidence"], 6
-        ) if len(predictions) > 1 else 1.0,
-        "top_predictions": predictions,
+        "margin": (
+            predictions[0]["confidence"] - predictions[1]["confidence"]
+        ) if len(predictions) > 1 else None,
+        "top_predictions": predictions[:top_k],
     }
 
 

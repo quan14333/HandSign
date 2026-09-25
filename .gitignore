@@ -1,5 +1,29 @@
-OpenFace-3.0/ 
-data/video/dataset.zip
-*.zip
-result*/
+# Local datasets, recordings, and legacy generated distance caches
 data*/
+result*/
+OpenFace-3.0/
+distand_info/
+label_baseline.json
+*.zip
+
+# Python environments, bytecode, and test output
+.venv*/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Per-machine editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local secrets (keep a documented example if one is added)
+.env
+.env.*
+!.env.example

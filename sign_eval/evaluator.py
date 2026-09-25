@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import io
+import hashlib
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,12 +23,25 @@ from .landmarks import (
     load_landmark_sequence,
     region_distances_on_path,
     tracking_report,
+    validate_landmarks,
 )
+from .paths import CALIBRATION_PATH, PROJECT_ROOT, REFERENCE_ARCHIVE, resolve_project_path
 
 
-DEFAULT_CALIBRATION_PATH = Path("artifacts/label_calibration.json")
-DEFAULT_VALIDATION_PATH = Path("artifacts/user_validation_calibration.json")
-MISMATCH_CONFIDENCE_THRESHOLD = 0.70
+DEFAULT_CALIBRATION_PATH = CALIBRATION_PATH
+DEFAULT_VALIDATION_PATH = PROJECT_ROOT / "artifacts/user_validation_calibration.json"
+
+
+def _probability(value: Any) -> float | None:
+    """Reject missing/malformed model output without leaking NaN into JSON."""
+
+    if value is None or isinstance(value, (bool, str, bytes)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if np.isfinite(number) and 0 <= number <= 1 else None
 
 
 def canonical_label(value: str) -> str:
@@ -63,13 +79,18 @@ class SignEvaluator:
             )
         with calibration_path.open("r", encoding="utf-8") as calibration_file:
             self.calibration = json.load(calibration_file)
+        self._calibration_digest = hashlib.sha256(calibration_path.read_bytes()).hexdigest().encode("ascii")
         if self.calibration.get("format_version") != 3:
             raise ValueError(
                 "Calibration format 3 with precomputed regional thresholds is required. "
                 "Run python build_calibration.py to rebuild calibration data."
             )
-        configured_root = Path(self.calibration["reference_root"])
+        configured_root = resolve_project_path(self.calibration["reference_root"])
         self.reference_root = Path(reference_root) if reference_root else configured_root
+        self.reference_archive = (
+            REFERENCE_ARCHIVE if reference_root is None
+            and calibration_path.resolve() == DEFAULT_CALIBRATION_PATH.resolve() else None
+        )
         self._label_lookup = {
             canonical_label(label): label for label in self.calibration["labels"]
         }
@@ -102,6 +123,24 @@ class SignEvaluator:
         details = self.calibration["labels"][label]
         label_dir = self.reference_root / label
         references: list[tuple[str, LandmarkSequence]] = []
+        archive = self.reference_archive
+        # A fresh clone has the compact reference pack, without the video dataset.
+        if archive is not None and archive.is_file() and not label_dir.is_dir():
+            with zipfile.ZipFile(archive) as packed:
+                if packed.comment != self._calibration_digest:
+                    raise ValueError("Reference pack does not match calibration. Rebuild with scripts/package_references.py.")
+                for filename in details["reference_files"]:
+                    name = f"{label}/{filename}"
+                    try:
+                        data = np.load(io.BytesIO(packed.read(name)), allow_pickle=False)
+                    except KeyError as error:
+                        raise ValueError(f"Reference pack is missing {name}. Rebuild with scripts/package_references.py.") from error
+                    references.append((filename, LandmarkSequence(
+                        validate_landmarks(data, name), source=f"{archive}!/{name}",
+                    )))
+            if not references:
+                raise ValueError(f"No valid references remain for label '{label}'.")
+            return references
         for filename in details["reference_files"]:
             path = label_dir / filename
             if not path.is_file():
@@ -279,32 +318,22 @@ class SignEvaluator:
             return {"status": "not_run"}
 
         predicted_label = recognition.get("predicted_label")
-        confidence = recognition.get("confidence")
-        margin = recognition.get("margin")
+        confidence = _probability(recognition.get("confidence"))
+        margin = _probability(recognition.get("margin"))
         result: dict[str, Any] = {
             "status": "uncertain",
-            "predicted_label": predicted_label,
-            "confidence": round(float(confidence), 4) if confidence is not None else None,
-            "margin": round(float(margin), 4) if margin is not None else None,
+            "predicted_label": predicted_label if isinstance(predicted_label, str) else None,
+            "confidence": confidence,
+            "margin": margin,
         }
-        if not predicted_label:
+        if not isinstance(predicted_label, str) or not predicted_label.strip():
             result["reason"] = "Recognizer returned no predicted label."
             return result
-        if confidence is None or not np.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
-            result["reason"] = "Recognizer returned no valid confidence."
-            return result
         if canonical_label(predicted_label) != canonical_label(target_label):
-            if float(confidence) >= MISMATCH_CONFIDENCE_THRESHOLD:
-                result["status"] = "mismatch"
-            else:
-                result["reason"] = "Different label confidence is below 0.70."
+            result["status"] = "mismatch"
             return result
-        if float(confidence) < 0.50:
-            result["reason"] = "Recognizer confidence is below 0.50."
-            return result
-        if margin is not None and float(margin) < 0.12:
-            result["reason"] = "The two leading label probabilities are too close."
-            return result
+        # Label agreement is the scoring gate. Probability values are diagnostic
+        # only: callers need not meet a confidence or top-two margin threshold.
         result["status"] = "match"
         return result
 
@@ -441,6 +470,28 @@ class SignEvaluator:
                 }
             )
             return EvaluationResult(base_payload)
+        if recognition_result["status"] != "match":
+            not_run = recognition_result["status"] == "not_run"
+            base_payload.update({
+                "status": "needs_label_confirmation",
+                "form": {
+                    "status": "not_scored",
+                    "score": None,
+                    "decision_source": "recognition_not_run" if not_run else "recognition_uncertain",
+                },
+                "feedback": [{
+                    "region": "recognition",
+                    "severity": "blocking",
+                    "message": (
+                        "Chưa chạy nhận diện nên chưa thể chấm điểm. "
+                        "Hãy cung cấp video cùng lần quay bằng --video."
+                        if not_run else
+                        f"Chưa nhận diện được tên động tác để đối chiếu với {label}. "
+                        "Hãy thực hiện lại rõ ràng, giữ tay trong khung hình."
+                    ),
+                }],
+            })
+            return EvaluationResult(base_payload)
         if tracking["status"] == "invalid":
             base_payload.update(
                 {
@@ -534,28 +585,14 @@ class SignEvaluator:
                     ),
                 },
             )
-        if recognition_result["status"] == "uncertain":
-            feedback.insert(
-                0,
-                {
-                    "region": "recognition",
-                    "severity": "warning",
-                    "message": (
-                        "Chưa xác nhận được đúng từ mục tiêu; "
-                        "điểm dưới đây chỉ đánh giá dáng động tác để luyện tập."
-                    ),
-                },
-            )
         if score is None:
             status = "not_scored"
-        elif recognition_result["status"] == "match":
+        else:
             status = (
                 "correct"
                 if form["status"] in {"excellent", "good"}
                 else "right_label_needs_practice"
             )
-        else:
-            status = "needs_label_confirmation"
 
         base_payload.update(
             {
