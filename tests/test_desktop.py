@@ -14,7 +14,7 @@ def scored_payload(score=84.84):
         "form": {"score": score, "status": "good", "comparison_distance": 4.17},
         "feedback": [{"region": "right_hand", "score": 81.05, "weight": 0.8,
                       "distance": 0.9662, "threshold": 1.302055,
-                      "severity": "ok", "message": "Tay phải khớp tốt."}],
+                      "severity": "ok", "message": "Vùng tay phải — 81.05/100: Đạt, động tác khớp tốt với mẫu."}],
     }
 
 
@@ -24,6 +24,8 @@ class ResultPresentationTests(unittest.TestCase):
         self.assertEqual(view["score"], "84.84 / 100")
         self.assertEqual(view["prediction"], "Bế mạc")
         self.assertEqual(view["rows"][0][:3], ("Tay phải", "81.05", "80.0%"))
+        self.assertEqual(view["rows"][0][-1], "Đạt")
+        self.assertEqual(view["feedback"], scored_payload()["feedback"][0]["message"])
         self.assertIn("40.0% (không phải điểm động tác)", view["diagnostics"])
         self.assertEqual(desktop.result_view(scored_payload(0))["score"], "0.00 / 100")
 

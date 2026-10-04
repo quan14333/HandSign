@@ -30,6 +30,14 @@ from .paths import CALIBRATION_PATH, PROJECT_ROOT, REFERENCE_ARCHIVE, resolve_pr
 
 DEFAULT_CALIBRATION_PATH = CALIBRATION_PATH
 DEFAULT_VALIDATION_PATH = PROJECT_ROOT / "artifacts/user_validation_calibration.json"
+REGION_PASS_SCORE = 80.0
+REGION_NAMES = {"left_hand": "Tay trái", "right_hand": "Tay phải", "face": "Khuôn mặt"}
+
+
+def region_assessment(score: float) -> str:
+    if score >= REGION_PASS_SCORE:
+        return "Đạt"
+    return "Cần cải thiện" if score >= 70 else "Cần luyện thêm"
 
 
 def _probability(value: Any) -> float | None:
@@ -339,16 +347,13 @@ class SignEvaluator:
 
     @staticmethod
     def _feedback_message(region: str, start: int, end: int, frame_count: int) -> str:
-        labels = {
-            "left_hand": "Tay trái",
-            "right_hand": "Tay phải",
-            "face": "Khuôn mặt",
-        }
         start_percent = round(start / max(frame_count - 1, 1) * 100)
         end_percent = round(end / max(frame_count - 1, 1) * 100)
         return (
-            f"{labels[region]} lệch rõ nhất ở khoảng "
-            f"{start_percent}-{end_percent}% của động tác."
+            f"Đoạn lệch liên tục dài nhất của {REGION_NAMES[region].lower()} ở khoảng "
+            f"{start_percent}–{end_percent}% tiến trình động tác được chấm "
+            f"(khung hình {start + 1}–{end + 1}/{frame_count}), "
+            "khi so với mẫu gần nhất."
         )
 
     def _build_feedback(
@@ -391,17 +396,32 @@ class SignEvaluator:
         for region in required_regions:
             distance = float(np.median(mean_values[region]))
             threshold = float(thresholds[region])
-            within_threshold = distance <= threshold
+            score = self._region_score(distance, threshold)
+            passed = score >= REGION_PASS_SCORE
+            # Invert the linear score branch: 80 points corresponds to 23/30
+            # of the calibrated distance limit. Use this stricter limit to
+            # localize issues even when the regional score is still above 70.
+            attention_threshold = threshold * (0.3 + (100 - REGION_PASS_SCORE) * 0.7 / 30)
             item: dict[str, Any] = {
                 "region": region,
                 "distance": round(distance, 4),
                 "threshold": round(threshold, 4),
-                "score": self._region_score(distance, threshold),
+                "score": score,
+                "pass_score": REGION_PASS_SCORE,
                 "weight": weights[region],
-                "severity": "ok" if within_threshold else "needs_attention",
+                "severity": "ok" if passed else "needs_attention",
             }
-            if not within_threshold and best_traces is not None:
-                segment = largest_error_segment(best_traces[region], threshold)
+            heading = f"Vùng {REGION_NAMES[region].lower()} — {score:.2f}/100: "
+            if passed:
+                item["message"] = heading + "Đạt, động tác khớp tốt với mẫu."
+            else:
+                item["message"] = (
+                    heading + f"{region_assessment(score)}, chưa đạt ngưỡng {REGION_PASS_SCORE:g} điểm. "
+                )
+                segment = (
+                    largest_error_segment(best_traces[region], attention_threshold)
+                    if best_traces is not None else None
+                )
                 if segment is not None:
                     start, end = segment
                     item["segment"] = {
@@ -410,13 +430,12 @@ class SignEvaluator:
                         "start_percent": round(start / max(len(user) - 1, 1) * 100),
                         "end_percent": round(end / max(len(user) - 1, 1) * 100),
                     }
-                    item["message"] = self._feedback_message(
+                    item["message"] += self._feedback_message(
                         region, start, end, len(user)
                     )
                 else:
-                    item["message"] = "Vùng này chưa khớp ổn định với các mẫu gần nhất."
-            else:
-                item["message"] = "Vùng này đang khớp tốt với các mẫu gần nhất."
+                    item["message"] += "Chưa xác định được khoảng lệch cụ thể so với mẫu gần nhất."
+                item["message"] += f" Hãy tập luyện lại động tác vùng {REGION_NAMES[region].lower()} ."
             feedback.append(item)
 
         if low_sample:

@@ -269,6 +269,17 @@ at 85+, `good` at 70+, `needs_practice` at 30+, otherwise `far_from_reference`.
 Low sample counts remain visible in calibration quality and feedback warnings.
 These are practice-score design choices, not probabilities of correctness.
 Individual regions can still need attention when the weighted total is good.
+Regional feedback uses the displayed regional score: `Đạt` at 80+, `Cần cải thiện`
+at 70–79.99, and `Cần luyện thêm` below 70. Only regions at 80+ have severity `ok`.
+For regions below 80, the evaluator locates the longest contiguous run above
+23/30 times the calibrated distance threshold (the distance corresponding to 80
+points), using the closest reference's aligned per-user-frame errors. If no such
+run exists, it explicitly reports that no specific interval was found.
+Messages include the region name, score, and interval as progress percentages
+of the evaluated motion, plus frame numbers starting at 1. Structured `segment`
+frame indices remain zero-based and inclusive. Percentages use frame index /
+max(frame count - 1, 1); they refer to the evaluated sequence, which may have
+been trimmed, rather than timestamps in the original recording.
 
 ## Tests
 

@@ -15,10 +15,9 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Any, Callable, Literal
 
-from .evaluator import canonical_label
+from .evaluator import REGION_NAMES, REGION_PASS_SCORE, canonical_label, region_assessment
 
 
-REGION_NAMES = {"left_hand": "Tay trái", "right_hand": "Tay phải", "face": "Khuôn mặt"}
 STATUS_NAMES = {
     "correct": "Đúng từ mục tiêu",
     "right_label_needs_practice": "Đúng từ — cần luyện thêm động tác",
@@ -53,7 +52,7 @@ def result_view(payload: dict[str, Any]) -> dict[str, Any]:
                 REGION_NAMES[item["region"]], _number(item["score"]),
                 _number(item.get("weight"), percent=True), _number(item.get("distance")),
                 _number(item.get("threshold")),
-                "Khớp mẫu" if item.get("severity") == "ok" else "Cần chú ý",
+                region_assessment(item["score"]),
             ))
     diagnostics = [
         f"Mức độ động tác: {FORM_NAMES.get(form.get('status'), 'Chưa chấm điểm')}",
@@ -251,11 +250,12 @@ def render_result(parent: tk.Misc, payload: dict[str, Any]) -> None:
     ttk.Label(parent, text=f"Từ mục tiêu: {view['target']}   •   AI nhận diện: {view['prediction']}",
               wraplength=800).pack(anchor="w", pady=(0, 16))
     if view["rows"]:
+        ttk.Label(parent, text=f"Điểm đạt mỗi vùng: ≥ {REGION_PASS_SCORE:g}/100").pack(anchor="w", pady=(0, 8))
         columns = ("region", "score", "weight", "distance", "threshold", "status")
         table = ttk.Treeview(parent, columns=columns, show="headings", height=len(view["rows"]))
         for key, title, width in zip(columns,
-                ("Vùng", "Điểm / 100", "Trọng số", "Độ lệch", "Ngưỡng", "Nhận xét"),
-                (130, 100, 100, 100, 100, 140)):
+                ("Vùng", "Điểm / 100", "Trọng số", "Độ lệch", "Ngưỡng độ lệch", "Nhận xét"),
+                (130, 100, 100, 100, 130, 140)):
             table.heading(key, text=title)
             table.column(key, width=width, minwidth=70, anchor="center")
         for row in view["rows"]:

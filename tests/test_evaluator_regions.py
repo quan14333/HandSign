@@ -6,7 +6,67 @@ from pathlib import Path
 
 import numpy as np
 
-from sign_eval.evaluator import SignEvaluator
+from sign_eval.evaluator import SignEvaluator, region_assessment
+
+
+class RegionalFeedbackTests(unittest.TestCase):
+    def feedback_for(self, traces, threshold=1.0):
+        evaluator = SignEvaluator.__new__(SignEvaluator)
+        user = np.zeros((len(traces[0]), 48, 2), dtype=np.float32)
+        comparisons = [
+            ({"right_hand": float(np.mean(trace))}, {"right_hand": np.asarray(trace)})
+            for trace in traces
+        ]
+        with patch.object(evaluator, "_region_thresholds", return_value={
+            "thresholds": {"right_hand": threshold}, "sample_count": 3,
+        }), patch("sign_eval.evaluator.region_distances_on_path", side_effect=comparisons):
+            feedback, _ = evaluator._build_feedback(
+                "Example", user,
+                [{"reference": user, "path": []} for _ in traces],
+                False, ("right_hand",),
+            )
+        return feedback[0]
+
+    def test_localizes_longest_run_even_below_old_distance_limit(self):
+        item = self.feedback_for([[.7, .7, .9, .9, .9, .7, .95, .95, .7, .7, .7]])
+        self.assertGreater(item["score"], 70)
+        self.assertLess(item["score"], 80)
+        self.assertEqual(item["severity"], "needs_attention")
+        self.assertEqual(item["segment"], {
+            "start_frame": 2, "end_frame": 4, "start_percent": 20, "end_percent": 40,
+        })
+        self.assertIn("Vùng tay phải", item["message"])
+        self.assertIn("Cần cải thiện", item["message"])
+        self.assertIn("20–40%", item["message"])
+        self.assertIn("khung hình 3–5/11", item["message"])
+
+    def test_pass_boundary_and_lower_feedback_levels(self):
+        for ratio, assessment, passed in [
+            (.65, "Đạt", True), (23 / 30, "Đạt", True), (.767, "Cần cải thiện", False),
+            (1, "Cần cải thiện", False), (1.001, "Cần luyện thêm", False),
+        ]:
+            with self.subTest(ratio=ratio):
+                item = self.feedback_for([[ratio] * 5])
+                self.assertEqual(item["severity"] == "ok", passed)
+                self.assertEqual(region_assessment(item["score"]), assessment)
+                self.assertIn(assessment, item["message"])
+                self.assertEqual("segment" in item, not passed)
+
+    def test_no_segment_is_invented_when_nearest_reference_matches(self):
+        item = self.feedback_for([[.3] * 5, [.9] * 5, [.9] * 5])
+        self.assertEqual(item["severity"], "needs_attention")
+        self.assertNotIn("segment", item)
+        self.assertIn("Chưa xác định được khoảng lệch cụ thể", item["message"])
+
+    def test_zero_threshold_and_single_frame_have_valid_feedback(self):
+        matching = self.feedback_for([[0]], threshold=0)
+        self.assertEqual(matching["severity"], "ok")
+        self.assertNotIn("segment", matching)
+        different = self.feedback_for([[1]], threshold=0)
+        self.assertEqual(different["score"], 0)
+        self.assertEqual(different["segment"]["start_percent"], 0)
+        self.assertEqual(different["segment"]["end_percent"], 0)
+        self.assertIn("khung hình 1–1/1", different["message"])
 
 
 class ActiveRegionEvaluatorTests(unittest.TestCase):
@@ -113,7 +173,8 @@ class ActiveRegionEvaluatorTests(unittest.TestCase):
                 "thresholds": {"right_hand": 1.302055, "face": 1.763011},
                 "sample_count": 24,
             }), patch("sign_eval.evaluator.region_distances_on_path", return_value=(
-                {"right_hand": 0.9662, "face": 0.2686}, {}
+                {"right_hand": 0.9662, "face": 0.2686},
+                {"right_hand": np.full(5, 0.9662), "face": np.full(5, 0.2686)},
             )), patch.object(evaluator, "_reference_distribution", return_value=np.array([-1.0])):
                 result = evaluator.evaluate(user_path, label, {
                     "predicted_label": label, "confidence": 0.9, "margin": 0.5
