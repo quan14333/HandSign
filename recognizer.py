@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,25 @@ import numpy as np
 
 
 MODEL_NAME = "star092304/vi-sign-language-videomae-base"
+LOCAL_MODEL_PATH = Path(__file__).resolve().parent / "artifacts" / "recognition_model"
 NUM_FRAMES = 16
+
+
+class ModelSetupError(RuntimeError):
+    """An actionable recognition setup error safe to show in the practice UI."""
+
+
+def model_source() -> tuple[str, bool]:
+    configured = os.environ.get("HANDSIGN_MODEL_PATH")
+    local_path = Path(configured) if configured else LOCAL_MODEL_PATH
+    if configured or local_path.is_dir():
+        required = ("config.json", "preprocessor_config.json", "classifier_sequential.pth")
+        if not all((local_path / name).is_file() for name in required) or not any(
+            (local_path / name).is_file() for name in ("model.safetensors", "pytorch_model.bin")
+        ):
+            raise ModelSetupError("Model HandSign cục bộ chưa đầy đủ. Hãy chạy python scripts/download_model.py trong thư mục HandSign rồi khởi động lại dịch vụ.")
+        return str(local_path), True
+    return MODEL_NAME, False
 
 # The published checkpoint has several mojibake label strings in config.json.
 # Keep the checkpoint's class IDs unchanged and repair display text only.
@@ -62,15 +81,19 @@ def _load_model() -> tuple[Any, Any, Any]:
     from huggingface_hub import hf_hub_download
     from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 
-    processor = VideoMAEImageProcessor.from_pretrained(MODEL_NAME)
-    model = VideoMAEForVideoClassification.from_pretrained(
-        MODEL_NAME, ignore_mismatched_sizes=True
-    )
+    source, use_local = model_source()
+    try:
+        processor = VideoMAEImageProcessor.from_pretrained(source, local_files_only=use_local)
+        model = VideoMAEForVideoClassification.from_pretrained(
+            source, ignore_mismatched_sizes=True, local_files_only=use_local
+        )
+    except OSError as error:
+        raise ModelSetupError("Không nạp được model nhận diện. Hãy chạy python scripts/download_model.py trong thư mục HandSign khi có mạng, rồi khởi động lại dịch vụ.") from error
     feature_count = model.classifier.in_features
     model.classifier = nn.Sequential(
         nn.LayerNorm(feature_count), nn.Dropout(0.3), nn.Linear(feature_count, model.config.num_labels)
     )
-    checkpoint_path = hf_hub_download(
+    checkpoint_path = Path(source) / "classifier_sequential.pth" if use_local else hf_hub_download(
         repo_id=MODEL_NAME, filename="classifier_sequential.pth"
     )
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)

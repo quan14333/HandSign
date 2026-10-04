@@ -281,3 +281,50 @@ tests cover prefix suggestions, missing/unreadable videos, a relocated checkout
 without datasets, recognition gating, countdown, capture/evaluation flow and
 desktop results using simulated poses and model outputs;
 actual webcam framing and recognition accuracy require real recordings.
+
+## SignMate browser integration
+
+The frontend loads calibrated labels and bundled demonstration clips from this
+service, records up to 15 seconds with MediaRecorder, and sends that exact clip
+for landmark extraction and recognition. Scoring uses the existing evaluator;
+only `status=correct` enables Continue. Temporary uploaded videos, extracted
+landmarks and evaluation JSON are deleted after each request. The service accepts
+one evaluation at a time and bounds uploads to 25 MiB.
+
+Install the updated requirements into the HandSign Python environment, then run:
+
+```powershell
+python -m uvicorn api:app --host 127.0.0.1 --port 8001
+```
+
+Start the SignMate frontend with `npm run dev`. Its Vite proxy forwards
+`/handsign` to port 8001. For deployment, configure an equivalent reverse proxy
+or set `VITE_HANDSIGN_API_URL` to the service URL at build time and configure
+`HANDSIGN_ALLOWED_ORIGINS` (comma-separated frontend origins). This local adapter
+has no authentication: keep it on loopback for local use; an external deployment
+must use the application's authenticated gateway with request limits.
+
+The original SignMate session API still records session duration/XP separately.
+Model scores are displayed from HandSign and are not persisted into that API's
+`accuracy` field. The model evaluates completed clips, not live frames. First
+recognition may download model weights as described above.
+
+Bundled demonstration clips use FMP4. `/samples/{label}` converts them lazily to
+VP8/WebM in the ignored `artifacts/browser_samples/` cache so browser playback
+works; originals stay unchanged. `run-api.ps1` launches the service with the same
+Python 3.10–3.12 environment created by `scripts/setup.ps1`.
+
+### Offline recognition model
+
+Run `python scripts/download_model.py` once with network access. Recognition then
+prefers `artifacts/recognition_model/` and uses `local_files_only=True`, avoiding
+network checks while grading. `HANDSIGN_MODEL_PATH` can select another complete
+local model directory. The downloaded weights are ignored by Git. The loader
+checks that configuration, preprocessing, base weights and the classifier
+checkpoint are present and reports an actionable setup error for incomplete data.
+
+On this integrated checkout, `run-api.ps1` prefers `.venv-handsign`; if absent,
+it uses Python on PATH with the locally installed `.verification/api-deps`.
+It checks required modules first and restores PYTHONPATH when the service exits.
+This fallback uses the machine runtime tested for this checkout; fresh machines
+should still create the recommended environment with `scripts/setup.ps1`.

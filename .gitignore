@@ -27,3 +27,8 @@ desktop.ini
 .env
 .env.*
 !.env.example
+
+# Local verification dependencies
+.verification/
+artifacts/browser_samples/
+artifacts/recognition_model/
