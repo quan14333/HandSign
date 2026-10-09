@@ -9,3 +9,8 @@ Pillow>=10,<12
 torch>=2.6,<3
 transformers>=4.57,<5
 huggingface-hub>=0.34,<1
+
+# Browser practice API
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.18,<1

@@ -57,3 +57,21 @@ class PredictionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class LocalModelTests(unittest.TestCase):
+    def test_complete_local_model_uses_local_source(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from recognizer import model_source
+        with TemporaryDirectory() as directory:
+            for name in ('config.json', 'preprocessor_config.json', 'classifier_sequential.pth', 'model.safetensors'):
+                (Path(directory) / name).touch()
+            with patch.dict('os.environ', {'HANDSIGN_MODEL_PATH': directory}):
+                self.assertEqual(model_source(), (directory, True))
+
+    def test_partial_local_model_reports_setup_error(self):
+        from tempfile import TemporaryDirectory
+        from recognizer import model_source, ModelSetupError
+        with TemporaryDirectory() as directory, patch.dict('os.environ', {'HANDSIGN_MODEL_PATH': directory}):
+            with self.assertRaisesRegex(ModelSetupError, 'download_model.py'):
+                model_source()
